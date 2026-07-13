@@ -14,8 +14,6 @@ from src.oscillation import neutrino_oscillation
 from src.background import normalizeToTable, interpolateToBins
 
 # Define Constants
-FIGURE_path = "img/osc_JUNO-Model_background.png"
-
 kg_to_MeV = 5.61e29
 m_p = 1.6726219e-27 * kg_to_MeV
 m_n = 1.6749275e-27 * kg_to_MeV
@@ -98,7 +96,7 @@ phi_E = np.clip(phi_E, 0.0, None)
 sigma = sigma_ibd(E_nu, Delta, m_e)
 integrand_common = phi_E * sigma * Pee_weighted
 
-# Include detector energy response\
+# Include detector energy response
 NONLINEARITY_PATH = "data/positron_nonlinearity.csv"
 
 bin_width = 0.1
@@ -122,8 +120,36 @@ JUNO_path = "data/spect-fit.txt"
 df_JUNO = pd.read_csv(JUNO_path, sep=r"\s+", header=None)
 df_JUNO.columns = ["energy", "reactor_signal", "reactor_background", "data", "unoscillated_signal"]
 
-C_norm = np.max(df_JUNO["reactor_signal"]) / np.max(Ni_nl)
-osc_spectra = C_norm * Ni_nl
+C_norm = np.max(df_JUNO["reactor_signal"])
+osc_spectra_nominal = C_norm * Ni_nl
+
+
+# Normalization of the reactor neutrino event rate
+FIG_PATH = "img/osc_sys_norm.png"
+
+rng = np.random.default_rng(seed=123)
+XI_REACTOR_RATE = rng.normal(loc=0.0, scale=1.0)
+
+
+REACTOR_RATE_UNCERTAINTIES = {
+    "target_protons": 0.010,
+    "reference_spectrum": 0.012,
+    "thermal_power": 0.005,
+    "fission_fraction": 0.006,
+    "spent_nuclear_fuel": 0.003,
+    "non_equilibrium": 0.002,
+    "different_fission_fraction": 0.001,
+}
+
+SIGMA_REACTOR_RATE = np.sqrt(np.sum(np.array(list(REACTOR_RATE_UNCERTAINTIES.values()), dtype=float) ** 2))
+print("Combined reactor event-rate uncertainty: "f"{100.0 * SIGMA_REACTOR_RATE:.3f}%")
+
+reactor_rate_factor = 1.0 + SIGMA_REACTOR_RATE * XI_REACTOR_RATE
+osc_spectra = reactor_rate_factor * osc_spectra_nominal
+
+print(f"Random reactor-rate pull: xi = {XI_REACTOR_RATE:.4f}")
+print(f"Reactor-rate factor: {reactor_rate_factor:.6f}")
+print("Applied normalization shift: "f"{100.0 * (reactor_rate_factor - 1.0):+.3f}%")
 
 # Background contributions
 LIVE_DAYS = 59.1
@@ -172,17 +198,16 @@ osc_spectra_background = osc_spectra + Total_Background
 
 # Plotting and Saving Figure
 plt.figure(figsize=(7.5, 4.8))
-plt.plot(df_JUNO["energy"], df_JUNO["reactor_background"], "-", lw=2, color="indianred", label="JUNO osc. + BG")
-plt.plot(df_JUNO["energy"], df_JUNO["reactor_signal"], "-", lw=2, color="darkcyan", label="JUNO osc.")
-plt.plot(E_prompt_bins, osc_spectra_background, ":", lw=2, color="indianred", label="Model osc. + BG")
-plt.plot(E_prompt_bins, osc_spectra, ":", lw=2, color="darkcyan", label="Model osc.")
+plt.plot(E_prompt_bins, osc_spectra + Total_Background, ":", color="darkgoldenrod", lw=3, label=(rf"Random norm. pull: "rf"$\xi_{{\rm norm}}={XI_REACTOR_RATE:.2f}$"))
+plt.plot(E_prompt_bins, osc_spectra_nominal + Total_Background, "-", color="darkorange" ,lw=2, label="Model osc. (nominal)")
 plt.xlabel(r"$E_{\rm pr}$ [MeV]")
 plt.ylabel("Events per 0.1 MeV")
-plt.title("Oscillated Spectra with Background")
+plt.title("Model with normalization of the reactor event rate")
 plt.grid(True)
 plt.legend()
 plt.tight_layout()
-plt.savefig(FIGURE_path, dpi=300)
-plt.show()
 
-print(f"Saved figure to: {FIGURE_path}")
+
+plt.savefig(FIG_PATH, dpi=300, bbox_inches='tight')
+print(f"Saved figure to: {FIG_PATH}")
+plt.show()

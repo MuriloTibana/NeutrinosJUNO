@@ -33,8 +33,8 @@ DM21_MAX = 8.0e-5
 
 # Increase these for smoother contours.
 # 41 x 41 is a reasonable starting point.
-N_THETA12 = 40
-N_DM21 = 40
+N_THETA12 = 51
+N_DM21 = 51
 
 # Prompt-energy fitting range
 FIT_ENERGY_MIN = 0.8
@@ -59,8 +59,22 @@ MAX_PULL_ITERATIONS = 35
 PULL_TOLERANCE = 1.0e-7
 
 # Output paths
-FIG_PATH = Path("oscillation_fit_figure2_style.png")
-RESULTS_PATH = Path("oscillation_fit_cnf1_cnf2.npz")
+FIG_PATH = Path("oscillation_fit_figure2_style_improved.png")
+RESULTS_PATH = Path("oscillation_fit_cnf1_cnf2_improved.npz")
+
+# Match the public JUNO unoscillated spectrum bin by bin.
+# This is the tuning used in the independent reanalysis to absorb
+# small differences in reactor composition, response, and power.
+USE_BIN_BY_BIN_UNOSCILLATED_CORRECTION = True
+
+# Official JUNO solar-parameter result.  The black dashed reference
+# is drawn as a correlated Gaussian approximation to the published
+# best fit and one-dimensional errors.
+JUNO_BEST_SIN2_THETA12 = 0.3092
+JUNO_SIGMA_SIN2_THETA12 = 0.0087
+JUNO_BEST_DM21 = 7.50e-5
+JUNO_SIGMA_DM21 = 0.12e-5
+JUNO_CORRELATION = -0.23
 
 
 # ============================================================
@@ -878,31 +892,49 @@ juno_reactor_signal = df_JUNO[
     "reactor_signal"
 ].to_numpy(dtype=float)
 
+# Official best-fit reactor + background spectrum.
+juno_total_best_fit = df_JUNO[
+    "reactor_background"
+].to_numpy(dtype=float)
+
+# Measured candidates.  This remains the observation vector used
+# inside the statistical fit.
 juno_data = df_JUNO[
     "data"
 ].to_numpy(dtype=float)
 
-juno_order = np.argsort(
-    juno_energy
-)
+juno_unoscillated_signal = df_JUNO[
+    "unoscillated_signal"
+].to_numpy(dtype=float)
 
-juno_energy = juno_energy[
-    juno_order
-]
+juno_order = np.argsort(juno_energy)
 
-juno_reactor_signal = juno_reactor_signal[
-    juno_order
-]
-
-juno_data = juno_data[
-    juno_order
-]
-
+juno_energy = juno_energy[juno_order]
+juno_reactor_signal = juno_reactor_signal[juno_order]
+juno_total_best_fit = juno_total_best_fit[juno_order]
+juno_data = juno_data[juno_order]
+juno_unoscillated_signal = juno_unoscillated_signal[juno_order]
 
 juno_reactor_on_grid = np.interp(
     E_prompt_bins,
     juno_energy,
     juno_reactor_signal,
+    left=np.nan,
+    right=np.nan,
+)
+
+juno_total_on_grid = np.interp(
+    E_prompt_bins,
+    juno_energy,
+    juno_total_best_fit,
+    left=np.nan,
+    right=np.nan,
+)
+
+juno_unoscillated_on_grid = np.interp(
+    E_prompt_bins,
+    juno_energy,
+    juno_unoscillated_signal,
     left=np.nan,
     right=np.nan,
 )
@@ -915,36 +947,20 @@ observed_on_grid = np.interp(
     right=np.nan,
 )
 
-
 fit_mask = (
-    np.isfinite(
-        observed_on_grid
-    )
-    & np.isfinite(
-        juno_reactor_on_grid
-    )
-    & (
-        E_prompt_bins
-        >= FIT_ENERGY_MIN
-    )
-    & (
-        E_prompt_bins
-        <= FIT_ENERGY_MAX
-    )
-    & (
-        observed_on_grid
-        > 0.0
-    )
+    np.isfinite(observed_on_grid)
+    & np.isfinite(juno_reactor_on_grid)
+    & np.isfinite(juno_total_on_grid)
+    & np.isfinite(juno_unoscillated_on_grid)
+    & (E_prompt_bins >= FIT_ENERGY_MIN)
+    & (E_prompt_bins <= FIT_ENERGY_MAX)
+    & (observed_on_grid > 0.0)
 )
 
-if not np.any(
-    fit_mask
-):
-
+if not np.any(fit_mask):
     raise ValueError(
         "No valid JUNO bins were found in the fitting range."
     )
-
 
 # ============================================================
 # Load and normalize background spectra
@@ -954,7 +970,7 @@ LIVE_DAYS = 59.1
 
 TABLE1_RATES_CPD = {
     "Li_He": 4.3,
-    "geoneutrinos": 2.4,
+    "geoneutrinos": 1.2,
     "world_reactors": 0.88,
     "bi_po": 0.18,
     "others": (
@@ -962,7 +978,7 @@ TABLE1_RATES_CPD = {
         + 0.02
         + 0.05
         + 0.08
-        + 4.9e-2
+        + 4.9
     ),
 }
 
@@ -1013,12 +1029,18 @@ background_shapes = {
         ].to_numpy(dtype=float),
         E_prompt_bins,
     ),
-    "world_reactors": interpolateToBins(
-        E_raw,
-        df_raw[
-            "world_reactors_digitized"
-        ].to_numpy(dtype=float),
-        E_prompt_bins,
+    # The independent reanalysis uses the unoscillated reactor
+    # spectrum as the world-reactor shape because the long-baseline
+    # oscillations are averaged out.
+    "world_reactors": np.clip(
+        np.nan_to_num(
+            juno_unoscillated_on_grid,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ),
+        0.0,
+        None,
     ),
     "bi_po": interpolateToBins(
         E_raw,
@@ -1190,93 +1212,93 @@ for config_name, config in CONFIGURATIONS.items():
 
 
 # ============================================================
-# Calculate fixed reactor normalization C_norm
+# Calibrate the reactor prediction to the JUNO unoscillated spectrum
 # ============================================================
 
-reference_survival = compute_weighted_survival(
-    REFERENCE_SIN2_THETA12,
-    REFERENCE_DM21,
+# With no oscillations, every reactor contributes only its geometric
+# and thermal-power weight.
+noosc_weighted_probability = float(
+    np.sum(reactor_data["w"].to_numpy(dtype=float))
 )
 
-reference_kernel = (
+reference_unoscillated_kernel = (
     phi0_E
     * sigma_IBD
-    * reference_survival
+    * noosc_weighted_probability
     * trap_weights
 )
 
-reference_raw_reactor = (
-    configuration_cache[
-        "cnf1"
-    ]["R0"]
-    @ reference_kernel
+reference_raw_unoscillated = (
+    configuration_cache["cnf1"]["R0"]
+    @ reference_unoscillated_kernel
 )
 
+normalization_mask = (
+    fit_mask
+    & np.isfinite(reference_raw_unoscillated)
+    & (reference_raw_unoscillated > 0.0)
+    & (juno_unoscillated_on_grid > 0.0)
+)
+
+if not np.any(normalization_mask):
+    raise ValueError(
+        "No common positive bins are available for reactor calibration."
+    )
 
 if REACTOR_NORMALIZATION_MODE == "area":
-
-    model_total = np.sum(
-        reference_raw_reactor[
-            fit_mask
-        ]
-    )
-
-    juno_total = np.sum(
-        juno_reactor_on_grid[
-            fit_mask
-        ]
-    )
-
-    if model_total <= 0.0:
-
-        raise ValueError(
-            "The reference model reactor total is nonpositive."
-        )
-
     C_norm = (
-        juno_total
-        / model_total
+        np.sum(juno_unoscillated_on_grid[normalization_mask])
+        / np.sum(reference_raw_unoscillated[normalization_mask])
     )
-
 
 elif REACTOR_NORMALIZATION_MODE == "peak":
-
-    model_peak = np.max(
-        reference_raw_reactor[
-            fit_mask
-        ]
-    )
-
-    juno_peak = np.max(
-        juno_reactor_on_grid[
-            fit_mask
-        ]
-    )
-
-    if model_peak <= 0.0:
-
-        raise ValueError(
-            "The reference model reactor peak is nonpositive."
-        )
-
     C_norm = (
-        juno_peak
-        / model_peak
+        np.max(juno_unoscillated_on_grid[normalization_mask])
+        / np.max(reference_raw_unoscillated[normalization_mask])
     )
-
 
 else:
-
     raise ValueError(
-        "REACTOR_NORMALIZATION_MODE must be "
-        "'area' or 'peak'."
+        "REACTOR_NORMALIZATION_MODE must be 'area' or 'peak'."
     )
 
-
-print(
-    f"Fixed reactor normalization C_norm = {C_norm:.8e}"
+scaled_reference_unoscillated = (
+    C_norm * reference_raw_unoscillated
 )
 
+REACTOR_BIN_CORRECTION = np.ones_like(
+    E_prompt_bins,
+    dtype=float,
+)
+
+if USE_BIN_BY_BIN_UNOSCILLATED_CORRECTION:
+    valid_correction = (
+        np.isfinite(juno_unoscillated_on_grid)
+        & np.isfinite(scaled_reference_unoscillated)
+        & (juno_unoscillated_on_grid > 0.0)
+        & (scaled_reference_unoscillated > 0.0)
+    )
+
+    REACTOR_BIN_CORRECTION[valid_correction] = (
+        juno_unoscillated_on_grid[valid_correction]
+        / scaled_reference_unoscillated[valid_correction]
+    )
+
+    # Do not let empty edge bins generate pathological correction
+    # factors.  The correction inside the fit range should remain
+    # close to one.
+    REACTOR_BIN_CORRECTION = np.clip(
+        REACTOR_BIN_CORRECTION,
+        0.50,
+        1.50,
+    )
+
+print(f"Fixed reactor normalization C_norm = {C_norm:.8e}")
+print(
+    "Bin-by-bin unoscillated correction in fit range: "
+    f"{np.min(REACTOR_BIN_CORRECTION[fit_mask]):.4f} to "
+    f"{np.max(REACTOR_BIN_CORRECTION[fit_mask]):.4f}"
+)
 
 # ============================================================
 # Build linearized prediction and pull templates
@@ -1340,6 +1362,7 @@ def build_linearized_model(
 
     reactor_nominal = (
         C_norm
+        * REACTOR_BIN_CORRECTION
         * reactor_raw
     )
 
@@ -1350,6 +1373,7 @@ def build_linearized_model(
 
     flux_templates = (
         C_norm
+        * REACTOR_BIN_CORRECTION[:, None]
         * (
             cache["R0"]
             @ flux_kernel_matrix
@@ -1363,6 +1387,7 @@ def build_linearized_model(
 
     reactor_scale_minus = (
         C_norm
+        * REACTOR_BIN_CORRECTION
         * (
             cache["R_scale_minus"]
             @ central_kernel
@@ -1371,6 +1396,7 @@ def build_linearized_model(
 
     reactor_scale_plus = (
         C_norm
+        * REACTOR_BIN_CORRECTION
         * (
             cache["R_scale_plus"]
             @ central_kernel
@@ -1389,6 +1415,7 @@ def build_linearized_model(
 
     reactor_resolution_minus = (
         C_norm
+        * REACTOR_BIN_CORRECTION
         * (
             cache["R_resolution_minus"]
             @ central_kernel
@@ -1397,6 +1424,7 @@ def build_linearized_model(
 
     reactor_resolution_plus = (
         C_norm
+        * REACTOR_BIN_CORRECTION
         * (
             cache["R_resolution_plus"]
             @ central_kernel
@@ -2277,6 +2305,13 @@ def scan_configuration(
         )
     )
 
+    # Lower histogram in the paper: best-fit reactor spectrum with
+    # no nuisance-pull shifts and no backgrounds.
+    best_reactor_no_pulls = (
+        best_nominal
+        - configuration_cache[config_name]["total_background"]
+    )
+
 
     delta_chi2_grid = (
         chi2_grid
@@ -2351,6 +2386,7 @@ def scan_configuration(
         "best_chi2": best_chi2,
         "best_pulls": best_pulls,
         "best_prediction": best_prediction,
+        "best_reactor_no_pulls": best_reactor_no_pulls,
         "profile_theta12": profile_theta12,
         "profile_dm21": profile_dm21,
     }
@@ -2416,6 +2452,10 @@ np.savez(
         "cnf1"
     ]["best_prediction"],
 
+    best_reactor_no_pulls_cnf1=results[
+        "cnf1"
+    ]["best_reactor_no_pulls"],
+
     chi2_cnf2=results[
         "cnf2"
     ]["chi2_grid"],
@@ -2443,6 +2483,10 @@ np.savez(
     best_prediction_cnf2=results[
         "cnf2"
     ]["best_prediction"],
+
+    best_reactor_no_pulls_cnf2=results[
+        "cnf2"
+    ]["best_reactor_no_pulls"],
 
     nuisance_names=np.array(
         NUISANCE_NAMES,
@@ -2531,6 +2575,41 @@ LINE_STYLES = [
     "--",
     ":",
 ]
+
+# Correlated-Gaussian representation of the official JUNO result.
+# This uses the published best fit and 1D errors.  It is intended as
+# a faithful visual reference, not as a replacement for a released
+# official two-dimensional likelihood grid.
+THETA_MESH, DM21_MESH = np.meshgrid(
+    sin2_theta12_grid,
+    dm21_grid,
+)
+
+juno_x = (
+    (THETA_MESH - JUNO_BEST_SIN2_THETA12)
+    / JUNO_SIGMA_SIN2_THETA12
+)
+
+juno_y = (
+    (DM21_MESH - JUNO_BEST_DM21)
+    / JUNO_SIGMA_DM21
+)
+
+JUNO_DELTA_CHI2_GRID = (
+    juno_x**2
+    - 2.0 * JUNO_CORRELATION * juno_x * juno_y
+    + juno_y**2
+) / (1.0 - JUNO_CORRELATION**2)
+
+JUNO_PROFILE_THETA12 = (
+    (sin2_theta12_grid - JUNO_BEST_SIN2_THETA12)
+    / JUNO_SIGMA_SIN2_THETA12
+) ** 2
+
+JUNO_PROFILE_DM21 = (
+    (dm21_grid - JUNO_BEST_DM21)
+    / JUNO_SIGMA_DM21
+) ** 2
 
 
 for config_name in [
@@ -2622,6 +2701,37 @@ for config_name in [
         lw=2.0,
     )
 
+
+# ------------------------------------------------------------
+# Official JUNO reference, shown as black dashed curves
+# ------------------------------------------------------------
+
+ax_theta_profile.plot(
+    sin2_theta12_grid,
+    JUNO_PROFILE_THETA12,
+    color="black",
+    linestyle="--",
+    lw=1.8,
+    label="JUNO",
+)
+
+ax_contour.contour(
+    sin2_theta12_grid,
+    dm21_grid * 1.0e5,
+    JUNO_DELTA_CHI2_GRID,
+    levels=CONTOUR_LEVELS,
+    colors="black",
+    linestyles="--",
+    linewidths=1.6,
+)
+
+ax_dm_profile.plot(
+    JUNO_PROFILE_DM21,
+    dm21_grid * 1.0e5,
+    color="black",
+    linestyle="--",
+    lw=1.8,
+)
 
 # ============================================================
 # Format one-dimensional profile plots
@@ -2715,6 +2825,15 @@ for config_name in [
         label=config_name,
     )
 
+ax_contour.plot(
+    [],
+    [],
+    color="black",
+    linestyle="--",
+    lw=1.8,
+    label="JUNO",
+)
+
 ax_contour.legend(
     frameon=False,
     loc="upper right",
@@ -2749,54 +2868,51 @@ spectrum_axes = {
 }
 
 for config_name, axis in spectrum_axes.items():
+    result = results[config_name]
+    color = CONFIGURATIONS[config_name]["plot_color"]
 
-    result = results[
-        config_name
-    ]
-
-    axis.plot(
-        E_prompt_bins[
-            fit_mask
-        ],
-        result[
-            "best_prediction"
-        ][
-            fit_mask
-        ],
-        lw=2.0,
+    # Lower histograms: reactor-only spectra without pull shifts.
+    axis.step(
+        E_prompt_bins[fit_mask],
+        result["best_reactor_no_pulls"][fit_mask],
+        where="mid",
+        color=color,
+        lw=1.8,
         label=config_name,
     )
 
-    axis.plot(
-        E_prompt_bins[
-            fit_mask
-        ],
-        observed_on_grid[
-            fit_mask
-        ],
-        "--",
+    axis.step(
+        E_prompt_bins[fit_mask],
+        juno_reactor_on_grid[fit_mask],
+        where="mid",
         color="black",
-        lw=1.4,
+        linestyle="--",
+        lw=1.3,
         label="JUNO",
     )
 
-    axis.set_xlim(
-        FIT_ENERGY_MIN,
-        FIT_ENERGY_MAX,
+    # Upper histograms: reactor + backgrounds after profiling pulls.
+    axis.step(
+        E_prompt_bins[fit_mask],
+        result["best_prediction"][fit_mask],
+        where="mid",
+        color=color,
+        lw=1.8,
     )
 
-    axis.set_ylabel(
-        "Events per 0.1 MeV"
+    axis.step(
+        E_prompt_bins[fit_mask],
+        juno_total_on_grid[fit_mask],
+        where="mid",
+        color="black",
+        linestyle="--",
+        lw=1.3,
     )
 
-    axis.grid(
-        alpha=0.25
-    )
-
-    axis.legend(
-        frameon=False,
-        fontsize=9,
-    )
+    axis.set_xlim(FIT_ENERGY_MIN, FIT_ENERGY_MAX)
+    axis.set_ylabel("Events per 0.1 MeV")
+    axis.grid(alpha=0.25)
+    axis.legend(frameon=False, fontsize=9)
 
     axis.text(
         0.97,
@@ -2815,15 +2931,8 @@ for config_name, axis in spectrum_axes.items():
         fontsize=8.5,
     )
 
-
-ax_spectrum_cnf1.tick_params(
-    labelbottom=False
-)
-
-ax_spectrum_cnf2.set_xlabel(
-    r"$E_{\rm pr}\ [{\rm MeV}]$"
-)
-
+ax_spectrum_cnf1.tick_params(labelbottom=False)
+ax_spectrum_cnf2.set_xlabel(r"$E_{\rm pr}\ [{\rm MeV}]$")
 
 # ============================================================
 # Save and show figure
@@ -2852,6 +2961,13 @@ plt.show()
 # ============================================================
 
 print()
+print(
+    "Official JUNO reference: "
+    f"sin^2(theta12) = {JUNO_BEST_SIN2_THETA12:.4f} +/- "
+    f"{JUNO_SIGMA_SIN2_THETA12:.4f}, "
+    f"dm21 = ({JUNO_BEST_DM21 * 1.0e5:.2f} +/- "
+    f"{JUNO_SIGMA_DM21 * 1.0e5:.2f}) x 10^-5 eV^2"
+)
 print("=" * 78)
 print("FINAL OSCILLATION FIT RESULTS")
 print("=" * 78)

@@ -78,17 +78,42 @@ N_DM21_POINTS = 25
 FIT_MAXITER_GLOBAL = 160
 FIT_MAXITER_SCAN = 80
 
-# Narrower plotting/scanning window to reproduce the Figure 2-style panel.
-SIN2_THETA12_RANGE = (0.275, 0.385)
-DM21_RANGE = (6.4e-5, 7.7e-5)
+# Figure 2-style plotting/scanning window.
+SIN2_THETA12_RANGE = (0.27, 0.35)
+DM21_RANGE = (7.0e-5, 8.0e-5)
+
+# Prompt-energy bins included in the fit.
+FIT_ENERGY_MIN = 0.8
+FIT_ENERGY_MAX = 8.0
+
+# Fit both smooth JUNO reference curves:
+#   reactor_signal      -> reactor-only prediction
+#   reactor_background  -> reactor + backgrounds prediction
+FIT_SMOOTH_JUNO_REACTOR = True
+FIT_SMOOTH_JUNO_TOTAL = True
+
+REACTOR_SPECTRUM_WEIGHT = 1.0
+TOTAL_SPECTRUM_WEIGHT = 1.0
+
+# 1.0 gives the standard Gaussian nuisance penalty sum(xi_k^2).
+# Set to 0.0 only for a strict curve-closure diagnostic.
+PULL_PENALTY_WEIGHT = 1.0
+
+# Correlated-Gaussian JUNO plotting reference used only when an
+# exact external JUNO Delta-chi-square grid is unavailable.
+JUNO_BEST_SIN2_THETA12 = 0.3092
+JUNO_SIGMA_SIN2_THETA12 = 0.0087
+JUNO_BEST_DM21 = 7.50e-5
+JUNO_SIGMA_DM21 = 0.12e-5
+JUNO_CORRELATION = -0.23
 
 PULL_BOUNDS = (-5.0, 5.0)
 
 SAVE_RESULTS = True
 SAVE_FIGURES = True
 
-CONFIG_COMPARISON_FIGURE_PATH = PROJECT_ROOT / "configuration_comparison_cnf1_cnf2.png"
-CONFIG_COMPARISON_RESULTS_PATH = PROJECT_ROOT / "configuration_comparison_cnf1_cnf2.npz"
+CONFIG_COMPARISON_FIGURE_PATH = PROJECT_ROOT / "configuration_comparison_cnf1_cnf2_joint_smooth_fit.png"
+CONFIG_COMPARISON_RESULTS_PATH = PROJECT_ROOT / "configuration_comparison_cnf1_cnf2_joint_smooth_fit.npz"
 
 
 # ============================================================
@@ -354,6 +379,20 @@ juno_react_bk_interp = np.interp(
 
 C_react = float(np.max(juno_react_interp))
 C_noosc = float(np.max(juno_noosc_interp))
+
+fit_mask = (
+    np.isfinite(juno_react_interp)
+    & np.isfinite(juno_react_bk_interp)
+    & (x_model >= FIT_ENERGY_MIN)
+    & (x_model <= FIT_ENERGY_MAX)
+    & (juno_react_interp > 0.0)
+    & (juno_react_bk_interp > 0.0)
+)
+
+if not np.any(fit_mask):
+    raise ValueError(
+        "No valid JUNO bins were found in the fitting range."
+    )
 
 
 # ============================================================
@@ -938,7 +977,11 @@ print(f"  {'Total':8s}: {np.sum(B_total):.6g}")
 # Observation vector
 # ============================================================
 
-N_obs = juno_react_bk_interp.copy()
+N_obs_reactor = juno_react_interp.copy()
+N_obs_total = juno_react_bk_interp.copy()
+
+# Compatibility alias used in saved output.
+N_obs = N_obs_total.copy()
 
 
 # ============================================================
@@ -1135,7 +1178,14 @@ def make_x_from_osc_and_pulls(
 # Prediction and chi-square
 # ============================================================
 
-def predict_from_fit_vector(x: np.ndarray) -> np.ndarray:
+def predict_components_from_fit_vector(
+    x: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """
+    Recalculate the full nonlinear prediction at the current
+    oscillation parameters and nuisance pulls.
+    """
+
     p = unpack_fit_vector(x)
 
     S_raw = reactor_spectrum_raw(
@@ -1150,48 +1200,80 @@ def predict_from_fit_vector(x: np.ndarray) -> np.ndarray:
 
     S_reactor = REACTOR_SCALE * S_raw
 
-    S_sys = positive_scale(SIGMA_REACTOR_NORM, p["xi_reactor"]) * S_reactor
+    S_sys = (
+        positive_scale(
+            SIGMA_REACTOR_NORM,
+            p["xi_reactor"],
+        )
+        * S_reactor
+    )
 
     B_LiHe_sys = (
-        positive_scale(SIGMA_BG_NORM["LiHe"], p["xi_LiHe"])
+        positive_scale(
+            SIGMA_BG_NORM["LiHe"],
+            p["xi_LiHe"],
+        )
         * B_components["LiHe"]
     )
 
     B_Geo_sys = (
-        positive_scale(SIGMA_BG_NORM["Geo"], p["xi_Geo"])
+        positive_scale(
+            SIGMA_BG_NORM["Geo"],
+            p["xi_Geo"],
+        )
         * B_components["Geo"]
     )
 
     B_World_sys = (
-        positive_scale(SIGMA_BG_NORM["World"], p["xi_World"])
+        positive_scale(
+            SIGMA_BG_NORM["World"],
+            p["xi_World"],
+        )
         * B_components["World"]
     )
 
     B_BiPo_sys = (
-        positive_scale(SIGMA_BG_NORM["BiPo"], p["xi_BiPo"])
+        positive_scale(
+            SIGMA_BG_NORM["BiPo"],
+            p["xi_BiPo"],
+        )
         * B_components["BiPo"]
     )
 
     B_Other_sys = (
-        positive_scale(SIGMA_BG_NORM["Other"], p["xi_Other"])
+        positive_scale(
+            SIGMA_BG_NORM["Other"],
+            p["xi_Other"],
+        )
         * B_components["Other"]
     )
 
     B_LiHe_sys = B_LiHe_sys * (
-        1.0 + p["xi_LiHe_shape"] * lihe_shape_fraction
+        1.0
+        + p["xi_LiHe_shape"]
+        * lihe_shape_fraction
     )
     B_LiHe_sys = np.clip(B_LiHe_sys, 0.0, None)
 
-    N_pred = (
-        S_sys
-        + B_LiHe_sys
+    B_total_sys = (
+        B_LiHe_sys
         + B_Geo_sys
         + B_World_sys
         + B_BiPo_sys
         + B_Other_sys
     )
 
-    return np.clip(N_pred, 1e-12, None)
+    N_pred = S_sys + B_total_sys
+
+    return {
+        "reactor": np.clip(S_sys, 1e-12, None),
+        "background": np.clip(B_total_sys, 0.0, None),
+        "total": np.clip(N_pred, 1e-12, None),
+    }
+
+
+def predict_from_fit_vector(x: np.ndarray) -> np.ndarray:
+    return predict_components_from_fit_vector(x)["total"]
 
 
 def chi2_data_term(N_obs: np.ndarray, N_pred: np.ndarray) -> float:
@@ -1219,13 +1301,41 @@ def chi2_data_term(N_obs: np.ndarray, N_pred: np.ndarray) -> float:
 
 
 def chi2_full(x: np.ndarray) -> float:
+    """
+    Joint smooth-JUNO objective.
+
+    The full nonlinear response is rebuilt on every call. The
+    nuisance parameters are therefore numerically profiled rather
+    than represented by fixed linear templates.
+    """
+
     p = unpack_fit_vector(x)
+    components = predict_components_from_fit_vector(x)
 
-    N_pred = predict_from_fit_vector(x)
+    chi2_stat = 0.0
 
-    chi2_stat = chi2_data_term(N_obs, N_pred)
+    if FIT_SMOOTH_JUNO_REACTOR:
+        chi2_stat += (
+            REACTOR_SPECTRUM_WEIGHT
+            * chi2_data_term(
+                N_obs_reactor[fit_mask],
+                components["reactor"][fit_mask],
+            )
+        )
 
-    chi2_pull = np.sum(p["theta"] ** 2)
+    if FIT_SMOOTH_JUNO_TOTAL:
+        chi2_stat += (
+            TOTAL_SPECTRUM_WEIGHT
+            * chi2_data_term(
+                N_obs_total[fit_mask],
+                components["total"][fit_mask],
+            )
+        )
+
+    chi2_pull = (
+        PULL_PENALTY_WEIGHT
+        * np.sum(p["theta"] ** 2)
+    )
 
     return float(chi2_stat + chi2_pull)
 
@@ -1277,7 +1387,9 @@ def run_global_fit_current_config(cfg: dict) -> dict:
         fit_elapsed = perf_counter() - fit_t0
 
         x_best = result_global.x
-        N_best = predict_from_fit_vector(x_best)
+        components_best = predict_components_from_fit_vector(x_best)
+        N_best = components_best["total"]
+        N_reactor_best = components_best["reactor"]
         chi2_best = chi2_full(x_best)
         p_best = unpack_fit_vector(x_best)
 
@@ -1293,7 +1405,9 @@ def run_global_fit_current_config(cfg: dict) -> dict:
     else:
         result_global = None
         x_best = x_nominal.copy()
-        N_best = N_nominal.copy()
+        components_best = predict_components_from_fit_vector(x_best)
+        N_best = components_best["total"]
+        N_reactor_best = components_best["reactor"]
         chi2_best = chi2_nominal
         p_best = unpack_fit_vector(x_best)
 
@@ -1323,6 +1437,7 @@ def run_global_fit_current_config(cfg: dict) -> dict:
         "result_global": result_global,
         "x_best_global": x_best,
         "N_best_global": N_best,
+        "N_reactor_best_global": N_reactor_best,
         "chi2_best_global": chi2_best,
         "p_best_global": p_best,
     }
@@ -1444,7 +1559,11 @@ def run_solar_scan_current_config(cfg: dict, global_fit_result: dict) -> dict:
         theta=best_pulls_scan,
     )
 
-    N_best_scan = predict_from_fit_vector(x_best_scan)
+    best_scan_components = predict_components_from_fit_vector(
+        x_best_scan
+    )
+    N_best_scan = best_scan_components["total"]
+    N_reactor_best_scan = best_scan_components["reactor"]
 
     print("\nBest fit from 2D solar scan:")
     print(f"  sin^2(theta12) = {best_sin2_scan:.8f}")
@@ -1471,6 +1590,7 @@ def run_solar_scan_current_config(cfg: dict, global_fit_result: dict) -> dict:
         "best_pulls": best_pulls_scan,
         "x_best_scan": x_best_scan,
         "N_best_scan": N_best_scan,
+        "N_reactor_best_scan": N_reactor_best_scan,
         "chi2_min": chi2_min_scan,
         "scan_elapsed": scan_elapsed,
     }
@@ -1508,7 +1628,22 @@ for cfg in CONFIGURATIONS:
 if SAVE_RESULTS and RUN_SOLAR_SCAN:
     save_dict = {
         "x_model": x_model,
+        "fit_mask": fit_mask,
         "N_obs": N_obs,
+        "N_obs_reactor": N_obs_reactor,
+        "N_obs_total": N_obs_total,
+        "pull_penalty_weight": np.array(
+            PULL_PENALTY_WEIGHT,
+            dtype=float,
+        ),
+        "reactor_spectrum_weight": np.array(
+            REACTOR_SPECTRUM_WEIGHT,
+            dtype=float,
+        ),
+        "total_spectrum_weight": np.array(
+            TOTAL_SPECTRUM_WEIGHT,
+            dtype=float,
+        ),
         "pull_names": np.array(pull_names, dtype=object),
     }
 
@@ -1525,8 +1660,14 @@ if SAVE_RESULTS and RUN_SOLAR_SCAN:
         save_dict[f"{key}_best_sin2"] = scan["best_sin2"]
         save_dict[f"{key}_best_dm21"] = scan["best_dm21"]
         save_dict[f"{key}_N_best_scan"] = scan["N_best_scan"]
+        save_dict[f"{key}_N_reactor_best_scan"] = (
+            scan["N_reactor_best_scan"]
+        )
         save_dict[f"{key}_N_nominal"] = glob["N_nominal"]
         save_dict[f"{key}_N_best_global"] = glob["N_best_global"]
+        save_dict[f"{key}_N_reactor_best_global"] = (
+            glob["N_reactor_best_global"]
+        )
 
     np.savez(CONFIG_COMPARISON_RESULTS_PATH, **save_dict)
 
@@ -1544,15 +1685,19 @@ if RUN_SOLAR_SCAN:
     FIG2_PATH = PROJECT_ROOT / "figure2_cnf1_cnf2_style.png"
     FIG2_PDF_PATH = PROJECT_ROOT / "figure2_cnf1_cnf2_style.pdf"
 
-    # Optional external JUNO contour file.
-    # If you have the official JUNO scan/contour arrays, save them here with keys:
+    # Optional exact external JUNO likelihood grid.
+    # Expected keys:
     #   sin2_theta12_grid
     #   dm21_grid
     #   dchi2_grid
-    # Otherwise, the script uses cnf 2 as a dashed plotting proxy, only so the
-    # layout resembles the reference figure.
-    JUNO_REFERENCE_NPZ = PROJECT_ROOT / "data" / "juno_reference_solar_scan.npz"
-    USE_CNF2_AS_JUNO_PROXY_IF_MISSING = True
+    #
+    # If unavailable, a correlated-Gaussian JUNO reference is
+    # generated from the published best fit and 1D uncertainties.
+    JUNO_REFERENCE_NPZ = (
+        PROJECT_ROOT
+        / "data"
+        / "juno_reference_solar_scan.npz"
+    )
 
     paper_colors = {
         "cnf1": "#ff1493",   # magenta-like
@@ -1584,13 +1729,11 @@ if RUN_SOLAR_SCAN:
         ax.xaxis.set_minor_locator(AutoMinorLocator())
         ax.yaxis.set_minor_locator(AutoMinorLocator())
 
-    def load_juno_reference() -> dict | None:
+    def load_juno_reference() -> dict:
         """
-        Load independent JUNO contour arrays if available.
-
-        Without the official JUNO Delta-chi-square surface, spect-fit.txt alone
-        is not enough to reconstruct the dashed black contour. The fallback below
-        is only a visual placeholder.
+        Load an exact external JUNO Delta-chi-square grid when
+        available. Otherwise return a correlated-Gaussian visual
+        reference.
         """
 
         if JUNO_REFERENCE_NPZ.exists():
@@ -1607,20 +1750,45 @@ if RUN_SOLAR_SCAN:
 
             return juno_ref
 
-        if USE_CNF2_AS_JUNO_PROXY_IF_MISSING:
-            print("\nWarning: no external JUNO reference contour file found.")
-            print("Using cnf 2 as a dashed JUNO-style plotting proxy.")
-            print("For a real comparison, provide data/juno_reference_solar_scan.npz.")
+        print("\nWarning: exact JUNO likelihood grid not found.")
+        print("Using a correlated-Gaussian JUNO reference.")
 
-            cnf2_scan = get_config_result("cnf2")["scan"]
+        sin2_grid = np.linspace(
+            SIN2_THETA12_RANGE[0],
+            SIN2_THETA12_RANGE[1],
+            301,
+        )
 
-            return {
-                "sin2_theta12_grid": cnf2_scan["sin2_theta12_grid"],
-                "dm21_grid": cnf2_scan["dm21_grid"],
-                "dchi2_grid": cnf2_scan["dchi2_grid"],
-            }
+        dm21_grid = np.linspace(
+            DM21_RANGE[0],
+            DM21_RANGE[1],
+            301,
+        )
 
-        return None
+        theta_mesh, dm21_mesh = np.meshgrid(
+            sin2_grid,
+            dm21_grid,
+        )
+
+        theta_std = (
+            theta_mesh - JUNO_BEST_SIN2_THETA12
+        ) / JUNO_SIGMA_SIN2_THETA12
+
+        dm21_std = (
+            dm21_mesh - JUNO_BEST_DM21
+        ) / JUNO_SIGMA_DM21
+
+        dchi2_grid = (
+            theta_std**2
+            - 2.0 * JUNO_CORRELATION * theta_std * dm21_std
+            + dm21_std**2
+        ) / (1.0 - JUNO_CORRELATION**2)
+
+        return {
+            "sin2_theta12_grid": sin2_grid,
+            "dm21_grid": dm21_grid,
+            "dchi2_grid": dchi2_grid,
+        }
 
     def plot_contours_and_profiles(
         ax_main,
@@ -1690,25 +1858,6 @@ if RUN_SOLAR_SCAN:
             zorder=zorder,
         )
 
-    def reactor_only_spectrum_no_pulls(scan: dict) -> np.ndarray:
-        """
-        Reactor-only spectrum at the best-fit solar parameters.
-
-        This is the lower colored histogram in the right panels. It contains no
-        background components and no nuisance-pull shifts.
-        """
-
-        raw = reactor_spectrum_raw(
-            sin2_theta12_fit=scan["best_sin2"],
-            dm21_fit=scan["best_dm21"],
-            xi_flux=None,
-            xi_scl=0.0,
-            xi_bias=0.0,
-            xi_res=0.0,
-            use_osc=True,
-        )
-
-        return REACTOR_SCALE * raw
 
     # --------------------------------------------------------
     # Figure layout
@@ -1836,38 +1985,50 @@ if RUN_SOLAR_SCAN:
         # computing the reactor-only histogram.
         set_analysis_configuration(cfg)
 
-        N_reactor_only = reactor_only_spectrum_no_pulls(scan)
+        N_reactor_with_pulls = scan["N_reactor_best_scan"]
         N_best_with_pulls_and_backgrounds = scan["N_best_scan"]
 
-        # Lower colored histogram: reactor-only, no pull shifts.
+        # Lower colored histogram: profiled reactor component.
         ax.step(
-            x_model,
-            N_reactor_only,
-            where="mid",
-            color=color,
-            lw=1.0,
-            alpha=0.65,
-        )
-
-        # Higher colored histogram: best fit with pulls and backgrounds.
-        ax.step(
-            x_model,
-            N_best_with_pulls_and_backgrounds,
+            x_model[fit_mask],
+            N_reactor_with_pulls[fit_mask],
             where="mid",
             color=color,
             lw=1.2,
             label=label,
         )
 
-        # JUNO target spectrum.
+        # Lower black dashed histogram: JUNO reactor signal.
         ax.step(
-            x_model,
-            N_obs,
+            x_model[fit_mask],
+            N_obs_reactor[fit_mask],
             where="mid",
             color="black",
+            linestyle="--",
             lw=1.0,
             label="JUNO",
         )
+
+        # Upper colored histogram: profiled reactor + backgrounds.
+        ax.step(
+            x_model[fit_mask],
+            N_best_with_pulls_and_backgrounds[fit_mask],
+            where="mid",
+            color=color,
+            lw=1.2,
+        )
+
+        # Upper black dashed histogram: JUNO total best fit.
+        ax.step(
+            x_model[fit_mask],
+            N_obs_total[fit_mask],
+            where="mid",
+            color="black",
+            linestyle="--",
+            lw=1.0,
+        )
+
+        ax.set_xlim(FIT_ENERGY_MIN, FIT_ENERGY_MAX)
 
         ax.set_ylabel("events per 0.1 MeV", fontsize=9)
 
@@ -1893,6 +2054,50 @@ if RUN_SOLAR_SCAN:
     print("\nSaved Figure 2-style plot to:")
     print(f"  {FIG2_PATH}")
     print(f"  {FIG2_PDF_PATH}")
+
+
+# ============================================================
+# Smooth-JUNO fit diagnostics
+# ============================================================
+
+if RUN_SOLAR_SCAN:
+    print()
+    print("=" * 88)
+    print("SMOOTH-JUNO FIT RESIDUALS")
+    print("=" * 88)
+
+    for result in configuration_results:
+        key = result["cfg"]["key"]
+        scan = result["scan"]
+
+        reactor_residual = (
+            scan["N_reactor_best_scan"][fit_mask]
+            - N_obs_reactor[fit_mask]
+        )
+
+        total_residual = (
+            scan["N_best_scan"][fit_mask]
+            - N_obs_total[fit_mask]
+        )
+
+        print(f"\n{key}")
+        print(
+            "  reactor-only: "
+            f"RMS = {np.sqrt(np.mean(reactor_residual**2)):.6f}, "
+            f"max |residual| = {np.max(np.abs(reactor_residual)):.6f}"
+        )
+        print(
+            "  total:        "
+            f"RMS = {np.sqrt(np.mean(total_residual**2)):.6f}, "
+            f"max |residual| = {np.max(np.abs(total_residual)):.6f}"
+        )
+
+    print("=" * 88)
+
+print()
+print("Fitting system: full nonlinear nuisance profiling with L-BFGS-B")
+print("Targets: smooth JUNO reactor_signal and reactor_background")
+print(f"Pull penalty weight: {PULL_PENALTY_WEIGHT:.3f}")
 
 
 # ============================================================

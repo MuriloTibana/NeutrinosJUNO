@@ -11,10 +11,17 @@ from src.phiHuber import phi_huber_weighted
 from src.crossSectionIBD import sigma_ibd
 from src.energyResponse import compute_spectrum_with_response
 from src.oscillation import neutrino_oscillation
-from src.background import normalizeToTable, interpolateToBins
+from src.background import normalizeToTable, interpolateToBins, draw_physical_pull
 
 # Define Constants
-FIGURE_path = "img/osc_JUNO-Model_background.png"
+
+reactor_normalization = True
+
+if reactor_normalization: 
+    FIG_PATH = "img/osc_sys_norm_bg.png"
+else:
+    FIG_PATH = "img/osc_sys_bg.png"
+
 
 kg_to_MeV = 5.61e29
 m_p = 1.6726219e-27 * kg_to_MeV
@@ -98,7 +105,7 @@ phi_E = np.clip(phi_E, 0.0, None)
 sigma = sigma_ibd(E_nu, Delta, m_e)
 integrand_common = phi_E * sigma * Pee_weighted
 
-# Include detector energy response\
+# Include detector energy response
 NONLINEARITY_PATH = "data/positron_nonlinearity.csv"
 
 bin_width = 0.1
@@ -122,8 +129,34 @@ JUNO_path = "data/spect-fit.txt"
 df_JUNO = pd.read_csv(JUNO_path, sep=r"\s+", header=None)
 df_JUNO.columns = ["energy", "reactor_signal", "reactor_background", "data", "unoscillated_signal"]
 
-C_norm = np.max(df_JUNO["reactor_signal"]) / np.max(Ni_nl)
-osc_spectra = C_norm * Ni_nl
+C_norm = np.max(df_JUNO["reactor_signal"])
+osc_spectra_nominal = C_norm * Ni_nl
+
+
+# Normalization of the reactor neutrino event rate
+rng = np.random.default_rng(seed=123)
+XI_REACTOR_RATE = rng.normal(loc=0.0, scale=1.0)
+
+
+REACTOR_RATE_UNCERTAINTIES = {
+    "target_protons": 0.010,
+    "reference_spectrum": 0.012,
+    "thermal_power": 0.005,
+    "fission_fraction": 0.006,
+    "spent_nuclear_fuel": 0.003,
+    "non_equilibrium": 0.002,
+    "different_fission_fraction": 0.001,
+}
+
+SIGMA_REACTOR_RATE = np.sqrt(np.sum(np.array(list(REACTOR_RATE_UNCERTAINTIES.values()), dtype=float) ** 2))
+print("Combined reactor event-rate uncertainty: "f"{100.0 * SIGMA_REACTOR_RATE:.3f}%")
+
+reactor_rate_factor = 1.0 + SIGMA_REACTOR_RATE * XI_REACTOR_RATE
+osc_spectra = reactor_rate_factor * osc_spectra_nominal
+
+print(f"Random reactor-rate pull: xi = {XI_REACTOR_RATE:.4f}")
+print(f"Reactor-rate factor: {reactor_rate_factor:.6f}")
+print("Applied normalization shift: "f"{100.0 * (reactor_rate_factor - 1.0):+.3f}%")
 
 # Background contributions
 LIVE_DAYS = 59.1
@@ -134,6 +167,14 @@ TABLE1_RATES_CPD = {
     "world_reactors": 0.88,
     "bi_po": 0.18,
     "others": 0.04 + 0.02 + 0.05 + 0.08 + 4.9e-2}
+
+BACKGROUND_NORM_SIGMAS = {
+    "Li_He": 0.33,
+    "geoneutrinos": 0.56,
+    "world_reactors": 0.10,
+    "bi_po": 0.56,
+    "others": 1.00,
+}
 
 TABLE1_TOTAL_EVENTS = {
     name: rate * LIVE_DAYS
@@ -159,30 +200,96 @@ world_reactors_shape = interpolateToBins(E_raw, df_raw["world_reactors_digitized
 bi_po_shape = interpolateToBins(E_raw, df_raw["bi_po"].to_numpy(dtype=float), E_prompt_bins)
 others_shape = interpolateToBins(E_raw, df_raw["others"].to_numpy(dtype=float), E_prompt_bins)
 
-# Normalize interpolated curves using Table 1
 Li_He = normalizeToTable(Li_He_shape, "Li_He", BIN_WIDTH, TABLE1_TOTAL_EVENTS)
 geoneutrinos = normalizeToTable(geoneutrinos_shape, "geoneutrinos", BIN_WIDTH, TABLE1_TOTAL_EVENTS)
 world_reactors = normalizeToTable(world_reactors_shape, "world_reactors", BIN_WIDTH, TABLE1_TOTAL_EVENTS)
 bi_po = normalizeToTable(bi_po_shape, "bi_po", BIN_WIDTH, TABLE1_TOTAL_EVENTS)
 others = normalizeToTable(others_shape, "others", BIN_WIDTH, TABLE1_TOTAL_EVENTS)
 
-Total_Background = (Li_He + geoneutrinos + world_reactors + bi_po + others)
+background_nominal = {
+    "Li_He": Li_He,
+    "geoneutrinos": geoneutrinos,
+    "world_reactors": world_reactors,
+    "bi_po": bi_po,
+    "others": others}
 
-osc_spectra_background = osc_spectra + Total_Background
+XI_BACKGROUND = {
+    name: draw_physical_pull(rng, BACKGROUND_NORM_SIGMAS[name])
+    for name in background_nominal
+}
 
-# Plotting and Saving Figure
+background_pulled = {}
+background_factors = {}
+
+for name, nominal_spectrum in background_nominal.items():
+
+    sigma_bg = BACKGROUND_NORM_SIGMAS[name]
+    xi_bg = XI_BACKGROUND[name]
+
+    normalization_factor = 1.0 + sigma_bg * xi_bg
+
+    background_factors[name] = normalization_factor
+
+    background_pulled[name] = normalization_factor * nominal_spectrum
+
+print("\nBackground normalization pulls")
+print("=" * 76)
+
+for name in background_nominal:
+
+    xi_bg = XI_BACKGROUND[name]
+    sigma_bg = BACKGROUND_NORM_SIGMAS[name]
+    factor_bg = background_factors[name]
+
+    nominal_events = np.sum(
+        background_nominal[name]
+    )
+
+    pulled_events = np.sum(
+        background_pulled[name]
+    )
+
+    print(
+        f"{name:20s} | "
+        f"xi = {xi_bg:+8.4f} | "
+        f"sigma = {100.0 * sigma_bg:6.2f}% | "
+        f"factor = {factor_bg:8.4f} | "
+        f"events = {nominal_events:9.3f} "
+        f"-> {pulled_events:9.3f}"
+    )
+
+print("=" * 76)
+
+Total_Background_nominal = sum(
+    background_nominal.values()
+)
+
+Total_Background = sum(
+    background_pulled.values()
+)
+osc_spectra_background_nominal = osc_spectra_nominal + Total_Background_nominal
+
+if reactor_normalization:    
+    osc_spectra_background = osc_spectra + Total_Background
+    label_pulls = "Reactor + background pulls"
+    label_nominal = "Reactor + nominal backgrounds"
+    label_title = "Model with Reactor and Background Normalization Pulls"
+else:
+    osc_spectra_background = osc_spectra_nominal + Total_Background
+    label_pulls = "Nominal Reactor + background pulls"
+    label_nominal = "Nominal Reactor + nominal backgrounds"
+    label_title = "Model with Nominal Reactor and Background Normalization Pulls"
+
 plt.figure(figsize=(7.5, 4.8))
-plt.plot(df_JUNO["energy"], df_JUNO["reactor_background"], "-", lw=2, color="indianred", label="JUNO osc. + BG")
-plt.plot(df_JUNO["energy"], df_JUNO["reactor_signal"], "-", lw=2, color="darkcyan", label="JUNO osc.")
-plt.plot(E_prompt_bins, osc_spectra_background, ":", lw=2, color="indianred", label="Model osc. + BG")
-plt.plot(E_prompt_bins, osc_spectra, ":", lw=2, color="darkcyan", label="Model osc.")
+plt.plot(E_prompt_bins, osc_spectra_background, ":", color="darkgoldenrod", lw=3, label=label_pulls)
+plt.plot(E_prompt_bins, osc_spectra_background_nominal, "-", color="darkorange", lw=2, label=label_nominal)
 plt.xlabel(r"$E_{\rm pr}$ [MeV]")
 plt.ylabel("Events per 0.1 MeV")
-plt.title("Oscillated Spectra with Background")
+plt.title(label_title)
 plt.grid(True)
 plt.legend()
 plt.tight_layout()
-plt.savefig(FIGURE_path, dpi=300)
-plt.show()
+plt.savefig(FIG_PATH, dpi=300, bbox_inches="tight")
 
-print(f"Saved figure to: {FIGURE_path}")
+print(f"Saved figure to: {FIG_PATH}")
+plt.show()

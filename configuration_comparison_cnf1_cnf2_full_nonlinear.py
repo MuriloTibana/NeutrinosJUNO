@@ -31,10 +31,11 @@ SIN2_THETA12_MAX = 0.35
 DM21_MIN = 7.0e-5
 DM21_MAX = 8.0e-5
 
-# Increase these for smoother contours.
-# 41 x 41 is a reasonable starting point.
-N_THETA12 = 40
-N_DM21 = 40
+# A full nonlinear nuisance fit is much slower than the former
+# linearized-template fit. Start with 25 x 25 while testing.
+# Increase to 41 x 41 or 51 x 51 for the final smooth contours.
+N_THETA12 = 25
+N_DM21 = 25
 
 # Prompt-energy fitting range
 FIT_ENERGY_MIN = 0.8
@@ -49,18 +50,38 @@ FIT_ENERGY_MAX = 8.0
 # oscillation point and then held fixed during the scan.
 REACTOR_NORMALIZATION_MODE = "area"
 
-# Refine the best grid point using a continuous minimizer
+# Refine the best grid point using a continuous minimizer.
 REFINE_BEST_FIT = True
 
-# Maximum Newton iterations used to profile nuisance pulls
-MAX_PULL_ITERATIONS = 35
+# Numerical profiling options for the full nonlinear nuisance fit.
+# Every scan point minimizes the nuisance parameters with L-BFGS-B.
+PROFILE_MAXITER = 100
+PROFILE_FTOL = 1.0e-8
+PROFILE_GTOL = 1.0e-5
+PULL_BOUND_ABS = 5.0
 
-# Numerical convergence tolerance
-PULL_TOLERANCE = 1.0e-7
+# The response matrix is recalculated at the current scale and
+# resolution pulls. These small steps are used only to calculate
+# their local numerical derivatives for L-BFGS-B.
+RESPONSE_DERIVATIVE_STEP = 1.0e-3
 
 # Output paths
-FIG_PATH = Path("oscillation_fit_figure2_style.png")
-RESULTS_PATH = Path("oscillation_fit_cnf1_cnf2.npz")
+FIG_PATH = Path("oscillation_fit_figure2_style_full_nonlinear.png")
+RESULTS_PATH = Path("oscillation_fit_cnf1_cnf2_full_nonlinear.npz")
+
+# Match the public JUNO unoscillated spectrum bin by bin.
+# This is the tuning used in the independent reanalysis to absorb
+# small differences in reactor composition, response, and power.
+USE_BIN_BY_BIN_UNOSCILLATED_CORRECTION = True
+
+# Official JUNO solar-parameter result.  The black dashed reference
+# is drawn as a correlated Gaussian approximation to the published
+# best fit and one-dimensional errors.
+JUNO_BEST_SIN2_THETA12 = 0.3092
+JUNO_SIGMA_SIN2_THETA12 = 0.0087
+JUNO_BEST_DM21 = 7.50e-5
+JUNO_SIGMA_DM21 = 0.12e-5
+JUNO_CORRELATION = -0.23
 
 
 # ============================================================
@@ -878,31 +899,49 @@ juno_reactor_signal = df_JUNO[
     "reactor_signal"
 ].to_numpy(dtype=float)
 
+# Official best-fit reactor + background spectrum.
+juno_total_best_fit = df_JUNO[
+    "reactor_background"
+].to_numpy(dtype=float)
+
+# Measured candidates.  This remains the observation vector used
+# inside the statistical fit.
 juno_data = df_JUNO[
     "data"
 ].to_numpy(dtype=float)
 
-juno_order = np.argsort(
-    juno_energy
-)
+juno_unoscillated_signal = df_JUNO[
+    "unoscillated_signal"
+].to_numpy(dtype=float)
 
-juno_energy = juno_energy[
-    juno_order
-]
+juno_order = np.argsort(juno_energy)
 
-juno_reactor_signal = juno_reactor_signal[
-    juno_order
-]
-
-juno_data = juno_data[
-    juno_order
-]
-
+juno_energy = juno_energy[juno_order]
+juno_reactor_signal = juno_reactor_signal[juno_order]
+juno_total_best_fit = juno_total_best_fit[juno_order]
+juno_data = juno_data[juno_order]
+juno_unoscillated_signal = juno_unoscillated_signal[juno_order]
 
 juno_reactor_on_grid = np.interp(
     E_prompt_bins,
     juno_energy,
     juno_reactor_signal,
+    left=np.nan,
+    right=np.nan,
+)
+
+juno_total_on_grid = np.interp(
+    E_prompt_bins,
+    juno_energy,
+    juno_total_best_fit,
+    left=np.nan,
+    right=np.nan,
+)
+
+juno_unoscillated_on_grid = np.interp(
+    E_prompt_bins,
+    juno_energy,
+    juno_unoscillated_signal,
     left=np.nan,
     right=np.nan,
 )
@@ -915,36 +954,20 @@ observed_on_grid = np.interp(
     right=np.nan,
 )
 
-
 fit_mask = (
-    np.isfinite(
-        observed_on_grid
-    )
-    & np.isfinite(
-        juno_reactor_on_grid
-    )
-    & (
-        E_prompt_bins
-        >= FIT_ENERGY_MIN
-    )
-    & (
-        E_prompt_bins
-        <= FIT_ENERGY_MAX
-    )
-    & (
-        observed_on_grid
-        > 0.0
-    )
+    np.isfinite(observed_on_grid)
+    & np.isfinite(juno_reactor_on_grid)
+    & np.isfinite(juno_total_on_grid)
+    & np.isfinite(juno_unoscillated_on_grid)
+    & (E_prompt_bins >= FIT_ENERGY_MIN)
+    & (E_prompt_bins <= FIT_ENERGY_MAX)
+    & (observed_on_grid > 0.0)
 )
 
-if not np.any(
-    fit_mask
-):
-
+if not np.any(fit_mask):
     raise ValueError(
         "No valid JUNO bins were found in the fitting range."
     )
-
 
 # ============================================================
 # Load and normalize background spectra
@@ -954,7 +977,7 @@ LIVE_DAYS = 59.1
 
 TABLE1_RATES_CPD = {
     "Li_He": 4.3,
-    "geoneutrinos": 2.4,
+    "geoneutrinos": 1.2,
     "world_reactors": 0.88,
     "bi_po": 0.18,
     "others": (
@@ -962,7 +985,7 @@ TABLE1_RATES_CPD = {
         + 0.02
         + 0.05
         + 0.08
-        + 4.9e-2
+        + 4.9
     ),
 }
 
@@ -1013,12 +1036,18 @@ background_shapes = {
         ].to_numpy(dtype=float),
         E_prompt_bins,
     ),
-    "world_reactors": interpolateToBins(
-        E_raw,
-        df_raw[
-            "world_reactors_digitized"
-        ].to_numpy(dtype=float),
-        E_prompt_bins,
+    # The independent reanalysis uses the unoscillated reactor
+    # spectrum as the world-reactor shape because the long-baseline
+    # oscillations are averaged out.
+    "world_reactors": np.clip(
+        np.nan_to_num(
+            juno_unoscillated_on_grid,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ),
+        0.0,
+        None,
     ),
     "bi_po": interpolateToBins(
         E_raw,
@@ -1095,6 +1124,9 @@ FLUX_STOP = FLUX_START + nbin
 # Prepare each configuration
 # ============================================================
 
+# Only the nominal response matrix is cached for the reactor
+# calibration. During the nuisance fit, the response matrix is
+# rebuilt at the current energy-scale and resolution pulls.
 configuration_cache = {}
 
 for config_name, config in CONFIGURATIONS.items():
@@ -1102,868 +1134,678 @@ for config_name, config in CONFIGURATIONS.items():
     R0 = compute_response_matrix(
         r_nl=config["r_nl"],
         r_res=config["r_res"],
-        sigma_resolution=config[
-            "sigma_resolution"
-        ],
+        sigma_resolution=config["sigma_resolution"],
         xi_scale=0.0,
         xi_resolution=0.0,
-    )
-
-    R_scale_minus = compute_response_matrix(
-        r_nl=config["r_nl"],
-        r_res=config["r_res"],
-        sigma_resolution=config[
-            "sigma_resolution"
-        ],
-        xi_scale=-1.0,
-        xi_resolution=0.0,
-    )
-
-    R_scale_plus = compute_response_matrix(
-        r_nl=config["r_nl"],
-        r_res=config["r_res"],
-        sigma_resolution=config[
-            "sigma_resolution"
-        ],
-        xi_scale=+1.0,
-        xi_resolution=0.0,
-    )
-
-    R_resolution_minus = compute_response_matrix(
-        r_nl=config["r_nl"],
-        r_res=config["r_res"],
-        sigma_resolution=config[
-            "sigma_resolution"
-        ],
-        xi_scale=0.0,
-        xi_resolution=-1.0,
-    )
-
-    R_resolution_plus = compute_response_matrix(
-        r_nl=config["r_nl"],
-        r_res=config["r_res"],
-        sigma_resolution=config[
-            "sigma_resolution"
-        ],
-        xi_scale=0.0,
-        xi_resolution=+1.0,
     )
 
     backgrounds = {}
 
     for name, spectrum in background_base.items():
 
+        # The fixed r_BG factor is applied to every background
+        # except geoneutrinos, following the configuration table.
         if name == "geoneutrinos":
-
-            backgrounds[name] = (
-                spectrum.copy()
-            )
-
+            backgrounds[name] = spectrum.copy()
         else:
+            backgrounds[name] = config["r_bg"] * spectrum
 
-            backgrounds[name] = (
-                config["r_bg"]
-                * spectrum
-            )
-
-    total_background = np.zeros_like(
-        E_prompt_bins
-    )
+    total_background = np.zeros_like(E_prompt_bins, dtype=float)
 
     for spectrum in backgrounds.values():
+        total_background += spectrum
 
-        total_background += (
-            spectrum
-        )
-
-    configuration_cache[
-        config_name
-    ] = {
+    configuration_cache[config_name] = {
         "R0": R0,
-        "R_scale_minus": R_scale_minus,
-        "R_scale_plus": R_scale_plus,
-        "R_resolution_minus": R_resolution_minus,
-        "R_resolution_plus": R_resolution_plus,
         "backgrounds": backgrounds,
         "total_background": total_background,
     }
 
 
 # ============================================================
-# Calculate fixed reactor normalization C_norm
+# Calibrate the reactor prediction to the JUNO unoscillated spectrum
 # ============================================================
 
-reference_survival = compute_weighted_survival(
-    REFERENCE_SIN2_THETA12,
-    REFERENCE_DM21,
+# With no oscillations, every reactor contributes only its geometric
+# and thermal-power weight.
+noosc_weighted_probability = float(
+    np.sum(reactor_data["w"].to_numpy(dtype=float))
 )
 
-reference_kernel = (
+reference_unoscillated_kernel = (
     phi0_E
     * sigma_IBD
-    * reference_survival
+    * noosc_weighted_probability
     * trap_weights
 )
 
-reference_raw_reactor = (
-    configuration_cache[
-        "cnf1"
-    ]["R0"]
-    @ reference_kernel
+reference_raw_unoscillated = (
+    configuration_cache["cnf1"]["R0"]
+    @ reference_unoscillated_kernel
 )
 
+normalization_mask = (
+    fit_mask
+    & np.isfinite(reference_raw_unoscillated)
+    & (reference_raw_unoscillated > 0.0)
+    & (juno_unoscillated_on_grid > 0.0)
+)
+
+if not np.any(normalization_mask):
+    raise ValueError(
+        "No common positive bins are available for reactor calibration."
+    )
 
 if REACTOR_NORMALIZATION_MODE == "area":
-
-    model_total = np.sum(
-        reference_raw_reactor[
-            fit_mask
-        ]
-    )
-
-    juno_total = np.sum(
-        juno_reactor_on_grid[
-            fit_mask
-        ]
-    )
-
-    if model_total <= 0.0:
-
-        raise ValueError(
-            "The reference model reactor total is nonpositive."
-        )
-
     C_norm = (
-        juno_total
-        / model_total
+        np.sum(juno_unoscillated_on_grid[normalization_mask])
+        / np.sum(reference_raw_unoscillated[normalization_mask])
     )
-
 
 elif REACTOR_NORMALIZATION_MODE == "peak":
-
-    model_peak = np.max(
-        reference_raw_reactor[
-            fit_mask
-        ]
-    )
-
-    juno_peak = np.max(
-        juno_reactor_on_grid[
-            fit_mask
-        ]
-    )
-
-    if model_peak <= 0.0:
-
-        raise ValueError(
-            "The reference model reactor peak is nonpositive."
-        )
-
     C_norm = (
-        juno_peak
-        / model_peak
+        np.max(juno_unoscillated_on_grid[normalization_mask])
+        / np.max(reference_raw_unoscillated[normalization_mask])
     )
-
 
 else:
-
     raise ValueError(
-        "REACTOR_NORMALIZATION_MODE must be "
-        "'area' or 'peak'."
+        "REACTOR_NORMALIZATION_MODE must be 'area' or 'peak'."
     )
 
+scaled_reference_unoscillated = (
+    C_norm * reference_raw_unoscillated
+)
 
+REACTOR_BIN_CORRECTION = np.ones_like(
+    E_prompt_bins,
+    dtype=float,
+)
+
+if USE_BIN_BY_BIN_UNOSCILLATED_CORRECTION:
+    valid_correction = (
+        np.isfinite(juno_unoscillated_on_grid)
+        & np.isfinite(scaled_reference_unoscillated)
+        & (juno_unoscillated_on_grid > 0.0)
+        & (scaled_reference_unoscillated > 0.0)
+    )
+
+    REACTOR_BIN_CORRECTION[valid_correction] = (
+        juno_unoscillated_on_grid[valid_correction]
+        / scaled_reference_unoscillated[valid_correction]
+    )
+
+    # Do not let empty edge bins generate pathological correction
+    # factors.  The correction inside the fit range should remain
+    # close to one.
+    REACTOR_BIN_CORRECTION = np.clip(
+        REACTOR_BIN_CORRECTION,
+        0.50,
+        1.50,
+    )
+
+print(f"Fixed reactor normalization C_norm = {C_norm:.8e}")
 print(
-    f"Fixed reactor normalization C_norm = {C_norm:.8e}"
+    "Bin-by-bin unoscillated correction in fit range: "
+    f"{np.min(REACTOR_BIN_CORRECTION[fit_mask]):.4f} to "
+    f"{np.max(REACTOR_BIN_CORRECTION[fit_mask]):.4f}"
+)
+
+# ============================================================
+# Full nonlinear nuisance model
+# ============================================================
+
+# The Li/He shape uncertainty is 20% at 1 MeV and grows linearly
+# with prompt energy. It is applied multiplicatively to Li/He.
+LIHE_SHAPE_FRACTION = (
+    SIGMA_LIHE_SHAPE_AT_1MEV
+    * E_prompt_bins
+    / 1.0
 )
 
 
-# ============================================================
-# Build linearized prediction and pull templates
-# ============================================================
+def positive_pull_lower_bound(sigma):
+    """Lower pull bound that keeps 1 + sigma * xi positive."""
 
-def build_linearized_model(
+    if sigma <= 0.0:
+        return -PULL_BOUND_ABS
+
+    return max(
+        -PULL_BOUND_ABS,
+        (-1.0 + 1.0e-6) / sigma,
+    )
+
+
+# Build parameter-specific bounds. This keeps normalization and
+# Li/He shape factors physical without clipping inside the fit.
+PULL_BOUNDS = [
+    (-PULL_BOUND_ABS, PULL_BOUND_ABS)
+    for _ in range(N_NUISANCE)
+]
+
+PULL_BOUNDS[IDX_REACTOR_NORM] = (
+    positive_pull_lower_bound(SIGMA_REACTOR_RATE),
+    PULL_BOUND_ABS,
+)
+
+PULL_BOUNDS[IDX_LIHE_NORM] = (
+    positive_pull_lower_bound(BACKGROUND_NORM_SIGMAS["Li_He"]),
+    PULL_BOUND_ABS,
+)
+
+PULL_BOUNDS[IDX_GEO_NORM] = (
+    positive_pull_lower_bound(BACKGROUND_NORM_SIGMAS["geoneutrinos"]),
+    PULL_BOUND_ABS,
+)
+
+PULL_BOUNDS[IDX_WORLD_NORM] = (
+    positive_pull_lower_bound(BACKGROUND_NORM_SIGMAS["world_reactors"]),
+    PULL_BOUND_ABS,
+)
+
+PULL_BOUNDS[IDX_BIPO_NORM] = (
+    positive_pull_lower_bound(BACKGROUND_NORM_SIGMAS["bi_po"]),
+    PULL_BOUND_ABS,
+)
+
+PULL_BOUNDS[IDX_OTHER_NORM] = (
+    positive_pull_lower_bound(BACKGROUND_NORM_SIGMAS["others"]),
+    PULL_BOUND_ABS,
+)
+
+# Restrict the negative Li/He shape pull only over bins in which
+# the nominal Li/He component is present.
+lihe_reference = background_base["Li_He"]
+lihe_active = (
+    lihe_reference
+    > 1.0e-12 * max(float(np.max(lihe_reference)), 1.0)
+)
+
+if np.any(lihe_active):
+    maximum_lihe_shape_fraction = float(
+        np.max(LIHE_SHAPE_FRACTION[lihe_active])
+    )
+else:
+    maximum_lihe_shape_fraction = float(
+        np.max(LIHE_SHAPE_FRACTION)
+    )
+
+if maximum_lihe_shape_fraction > 0.0:
+    lihe_shape_lower = max(
+        -PULL_BOUND_ABS,
+        (-1.0 + 1.0e-6) / maximum_lihe_shape_fraction,
+    )
+else:
+    lihe_shape_lower = -PULL_BOUND_ABS
+
+PULL_BOUNDS[IDX_LIHE_SHAPE] = (
+    lihe_shape_lower,
+    PULL_BOUND_ABS,
+)
+
+
+def clip_to_pull_bounds(pulls):
+    """Clip a warm start into the allowed nuisance region."""
+
+    pulls = np.asarray(pulls, dtype=float).copy()
+
+    for index, (lower, upper) in enumerate(PULL_BOUNDS):
+        pulls[index] = np.clip(pulls[index], lower, upper)
+
+    return pulls
+
+
+def chi2_data_and_derivative(observed, predicted, chi2_type):
+    """
+    Return the statistical chi-square and its derivative with
+    respect to the predicted number of events in every bin.
+    """
+
+    observed = np.asarray(observed, dtype=float)
+    predicted = np.asarray(predicted, dtype=float)
+
+    if np.any(predicted <= 0.0):
+        return np.inf, np.full_like(predicted, np.nan)
+
+    if chi2_type == "cnp":
+
+        data_term = (
+            predicted**2 / (3.0 * observed)
+            - observed
+            + 2.0 * observed**2 / (3.0 * predicted)
+        )
+
+        derivative = (
+            2.0 * predicted / (3.0 * observed)
+            - 2.0 * observed**2 / (3.0 * predicted**2)
+        )
+
+        return float(np.sum(data_term)), derivative
+
+    if chi2_type == "poisson":
+
+        data_term = (
+            predicted
+            - observed
+            + observed * np.log(observed / predicted)
+        )
+
+        derivative = 2.0 * (1.0 - observed / predicted)
+
+        return float(2.0 * np.sum(data_term)), derivative
+
+    raise ValueError(
+        "chi2_type must be 'cnp' or 'poisson'."
+    )
+
+
+def evaluate_nonlinear_prediction(
     sin2_theta12,
     dm21,
     config_name,
+    pulls,
+    need_jacobian=False,
 ):
     """
-    Build
+    Recalculate the complete prediction at the current nuisance
+    parameters.
 
-        prediction = nominal + A @ xi
-
-    where xi contains all standardized nuisance pulls.
-
-    Background and flux pulls are linear exactly.
-
-    Energy scale and resolution are represented by symmetric
-    finite-difference derivatives around their nominal values.
+    Unlike the former linearized fit, this function rebuilds the
+    detector response matrix at the current energy-scale and
+    energy-resolution pulls and reevaluates the pulled reactor flux.
     """
 
-    cache = configuration_cache[
-        config_name
-    ]
+    pulls = np.asarray(pulls, dtype=float)
+
+    if pulls.size != N_NUISANCE:
+        raise ValueError(
+            f"Expected {N_NUISANCE} nuisance pulls, "
+            f"received {pulls.size}."
+        )
+
+    config = CONFIGURATIONS[config_name]
+    cache = configuration_cache[config_name]
+    backgrounds = cache["backgrounds"]
+
+    xi_reactor = pulls[IDX_REACTOR_NORM]
+    xi_scale = pulls[IDX_ENERGY_SCALE]
+    xi_resolution = pulls[IDX_ENERGY_RESOLUTION]
+    xi_lihe_norm = pulls[IDX_LIHE_NORM]
+    xi_lihe_shape = pulls[IDX_LIHE_SHAPE]
+    xi_geo = pulls[IDX_GEO_NORM]
+    xi_world = pulls[IDX_WORLD_NORM]
+    xi_bipo = pulls[IDX_BIPO_NORM]
+    xi_other = pulls[IDX_OTHER_NORM]
+    xi_flux = pulls[FLUX_START:FLUX_STOP]
 
     survival = compute_weighted_survival(
         sin2_theta12,
         dm21,
     )
 
-    common_energy_kernel = (
+    common_kernel = (
         sigma_IBD
         * survival
         * trap_weights
     )
 
-    central_kernel = (
+    # The Daya Bay flux construction is linear in its covariance
+    # modes. Evaluating it at the current pull vector is exact.
+    flux_raw = (
         phi0_E
-        * common_energy_kernel
+        + phi_basis_E @ xi_flux
     )
 
-    flux_kernel_matrix = (
-        phi_basis_E
-        * common_energy_kernel[
-            :,
-            None
-        ]
+    # Preserve the physical nonnegative flux. The Jacobian below
+    # correctly sets the flux-mode derivative to zero in clipped bins.
+    flux_positive = flux_raw > 0.0
+    phi_E = np.clip(flux_raw, 0.0, None)
+
+    response = compute_response_matrix(
+        r_nl=config["r_nl"],
+        r_res=config["r_res"],
+        sigma_resolution=config["sigma_resolution"],
+        xi_scale=xi_scale,
+        xi_resolution=xi_resolution,
     )
 
+    reactor_kernel = phi_E * common_kernel
 
-    # --------------------------------------------------------
-    # Nominal reactor prediction
-    # --------------------------------------------------------
+    reactor_raw = response @ reactor_kernel
 
-    reactor_raw = (
-        cache["R0"]
-        @ central_kernel
-    )
-
-    reactor_nominal = (
+    reactor_before_rate_pull = (
         C_norm
+        * REACTOR_BIN_CORRECTION
         * reactor_raw
     )
 
-
-    # --------------------------------------------------------
-    # Flux-mode templates
-    # --------------------------------------------------------
-
-    flux_templates = (
-        C_norm
-        * (
-            cache["R0"]
-            @ flux_kernel_matrix
-        )
+    reactor_rate_factor = (
+        1.0
+        + SIGMA_REACTOR_RATE * xi_reactor
     )
 
-
-    # --------------------------------------------------------
-    # Energy-scale template
-    # --------------------------------------------------------
-
-    reactor_scale_minus = (
-        C_norm
-        * (
-            cache["R_scale_minus"]
-            @ central_kernel
-        )
+    reactor = (
+        reactor_rate_factor
+        * reactor_before_rate_pull
     )
 
-    reactor_scale_plus = (
-        C_norm
-        * (
-            cache["R_scale_plus"]
-            @ central_kernel
-        )
+    lihe_norm_factor = (
+        1.0
+        + BACKGROUND_NORM_SIGMAS["Li_He"]
+        * xi_lihe_norm
     )
 
-    scale_template = 0.5 * (
-        reactor_scale_plus
-        - reactor_scale_minus
+    lihe_shape_factor = (
+        1.0
+        + LIHE_SHAPE_FRACTION
+        * xi_lihe_shape
     )
 
-
-    # --------------------------------------------------------
-    # Resolution template
-    # --------------------------------------------------------
-
-    reactor_resolution_minus = (
-        C_norm
-        * (
-            cache["R_resolution_minus"]
-            @ central_kernel
-        )
+    geo_factor = (
+        1.0
+        + BACKGROUND_NORM_SIGMAS["geoneutrinos"]
+        * xi_geo
     )
 
-    reactor_resolution_plus = (
-        C_norm
-        * (
-            cache["R_resolution_plus"]
-            @ central_kernel
-        )
+    world_factor = (
+        1.0
+        + BACKGROUND_NORM_SIGMAS["world_reactors"]
+        * xi_world
     )
 
-    resolution_template = 0.5 * (
-        reactor_resolution_plus
-        - reactor_resolution_minus
+    bipo_factor = (
+        1.0
+        + BACKGROUND_NORM_SIGMAS["bi_po"]
+        * xi_bipo
     )
 
-
-    # --------------------------------------------------------
-    # Nominal backgrounds
-    # --------------------------------------------------------
-
-    backgrounds = cache[
-        "backgrounds"
-    ]
-
-    total_background = cache[
-        "total_background"
-    ]
-
-
-    # --------------------------------------------------------
-    # Complete nominal prediction
-    # --------------------------------------------------------
-
-    nominal = (
-        reactor_nominal
-        + total_background
+    other_factor = (
+        1.0
+        + BACKGROUND_NORM_SIGMAS["others"]
+        * xi_other
     )
 
+    lihe = (
+        backgrounds["Li_He"]
+        * lihe_norm_factor
+        * lihe_shape_factor
+    )
 
-    # --------------------------------------------------------
-    # Pull-template matrix
-    # --------------------------------------------------------
+    geoneutrinos = (
+        backgrounds["geoneutrinos"]
+        * geo_factor
+    )
 
-    A = np.zeros(
-        (
-            len(E_prompt_bins),
-            N_NUISANCE,
-        ),
+    world_reactors = (
+        backgrounds["world_reactors"]
+        * world_factor
+    )
+
+    bi_po = (
+        backgrounds["bi_po"]
+        * bipo_factor
+    )
+
+    others = (
+        backgrounds["others"]
+        * other_factor
+    )
+
+    total_background = (
+        lihe
+        + geoneutrinos
+        + world_reactors
+        + bi_po
+        + others
+    )
+
+    prediction = reactor + total_background
+
+    components = {
+        "reactor": reactor,
+        "reactor_before_rate_pull": reactor_before_rate_pull,
+        "Li_He": lihe,
+        "geoneutrinos": geoneutrinos,
+        "world_reactors": world_reactors,
+        "bi_po": bi_po,
+        "others": others,
+        "total_background": total_background,
+    }
+
+    if not need_jacobian:
+        return prediction, components, None
+
+    jacobian = np.zeros(
+        (len(E_prompt_bins), N_NUISANCE),
         dtype=float,
     )
 
-    # Reactor-rate normalization
-    A[
-        :,
-        IDX_REACTOR_NORM
-    ] = (
+    # Reactor normalization derivative.
+    jacobian[:, IDX_REACTOR_NORM] = (
         SIGMA_REACTOR_RATE
-        * reactor_nominal
+        * reactor_before_rate_pull
     )
 
-    # Energy response
-    A[
-        :,
-        IDX_ENERGY_SCALE
-    ] = scale_template
+    # Flux-mode derivatives are exact at the current response.
+    effective_flux_basis = (
+        phi_basis_E
+        * flux_positive[:, None]
+    )
 
-    A[
-        :,
-        IDX_ENERGY_RESOLUTION
-    ] = resolution_template
+    flux_kernel_matrix = (
+        effective_flux_basis
+        * common_kernel[:, None]
+    )
 
-    # Background normalizations
-    A[
-        :,
-        IDX_LIHE_NORM
-    ] = (
+    reactor_flux_derivatives = (
+        C_norm
+        * REACTOR_BIN_CORRECTION[:, None]
+        * (response @ flux_kernel_matrix)
+    )
+
+    jacobian[:, FLUX_START:FLUX_STOP] = (
+        reactor_rate_factor
+        * reactor_flux_derivatives
+    )
+
+    # The full response is recalculated around the current scale
+    # and resolution pulls. These are local derivatives, not fixed
+    # templates around the nominal point.
+    step = RESPONSE_DERIVATIVE_STEP
+
+    response_scale_plus = compute_response_matrix(
+        r_nl=config["r_nl"],
+        r_res=config["r_res"],
+        sigma_resolution=config["sigma_resolution"],
+        xi_scale=xi_scale + step,
+        xi_resolution=xi_resolution,
+    )
+
+    response_scale_minus = compute_response_matrix(
+        r_nl=config["r_nl"],
+        r_res=config["r_res"],
+        sigma_resolution=config["sigma_resolution"],
+        xi_scale=xi_scale - step,
+        xi_resolution=xi_resolution,
+    )
+
+    derivative_response_scale = (
+        response_scale_plus
+        - response_scale_minus
+    ) / (2.0 * step)
+
+    jacobian[:, IDX_ENERGY_SCALE] = (
+        reactor_rate_factor
+        * C_norm
+        * REACTOR_BIN_CORRECTION
+        * (derivative_response_scale @ reactor_kernel)
+    )
+
+    response_resolution_plus = compute_response_matrix(
+        r_nl=config["r_nl"],
+        r_res=config["r_res"],
+        sigma_resolution=config["sigma_resolution"],
+        xi_scale=xi_scale,
+        xi_resolution=xi_resolution + step,
+    )
+
+    response_resolution_minus = compute_response_matrix(
+        r_nl=config["r_nl"],
+        r_res=config["r_res"],
+        sigma_resolution=config["sigma_resolution"],
+        xi_scale=xi_scale,
+        xi_resolution=xi_resolution - step,
+    )
+
+    derivative_response_resolution = (
+        response_resolution_plus
+        - response_resolution_minus
+    ) / (2.0 * step)
+
+    jacobian[:, IDX_ENERGY_RESOLUTION] = (
+        reactor_rate_factor
+        * C_norm
+        * REACTOR_BIN_CORRECTION
+        * (derivative_response_resolution @ reactor_kernel)
+    )
+
+    # Background normalization and Li/He shape derivatives.
+    jacobian[:, IDX_LIHE_NORM] = (
         BACKGROUND_NORM_SIGMAS["Li_He"]
         * backgrounds["Li_He"]
+        * lihe_shape_factor
     )
 
-    # Li/He shape uncertainty
-    lihe_shape_fraction = (
-        SIGMA_LIHE_SHAPE_AT_1MEV
-        * E_prompt_bins
-        / 1.0
-    )
-
-    A[
-        :,
-        IDX_LIHE_SHAPE
-    ] = (
-        lihe_shape_fraction
+    jacobian[:, IDX_LIHE_SHAPE] = (
+        LIHE_SHAPE_FRACTION
         * backgrounds["Li_He"]
+        * lihe_norm_factor
     )
 
-    A[
-        :,
-        IDX_GEO_NORM
-    ] = (
-        BACKGROUND_NORM_SIGMAS[
-            "geoneutrinos"
-        ]
-        * backgrounds[
-            "geoneutrinos"
-        ]
+    jacobian[:, IDX_GEO_NORM] = (
+        BACKGROUND_NORM_SIGMAS["geoneutrinos"]
+        * backgrounds["geoneutrinos"]
     )
 
-    A[
-        :,
-        IDX_WORLD_NORM
-    ] = (
-        BACKGROUND_NORM_SIGMAS[
-            "world_reactors"
-        ]
-        * backgrounds[
-            "world_reactors"
-        ]
+    jacobian[:, IDX_WORLD_NORM] = (
+        BACKGROUND_NORM_SIGMAS["world_reactors"]
+        * backgrounds["world_reactors"]
     )
 
-    A[
-        :,
-        IDX_BIPO_NORM
-    ] = (
-        BACKGROUND_NORM_SIGMAS[
-            "bi_po"
-        ]
-        * backgrounds[
-            "bi_po"
-        ]
+    jacobian[:, IDX_BIPO_NORM] = (
+        BACKGROUND_NORM_SIGMAS["bi_po"]
+        * backgrounds["bi_po"]
     )
 
-    A[
-        :,
-        IDX_OTHER_NORM
-    ] = (
-        BACKGROUND_NORM_SIGMAS[
-            "others"
-        ]
-        * backgrounds[
-            "others"
-        ]
+    jacobian[:, IDX_OTHER_NORM] = (
+        BACKGROUND_NORM_SIGMAS["others"]
+        * backgrounds["others"]
     )
 
-    # Daya Bay flux eigenmode pulls
-    A[
-        :,
-        FLUX_START:FLUX_STOP
-    ] = flux_templates
-
-    return nominal, A
+    return prediction, components, jacobian
 
 
-# ============================================================
-# CNP and Poisson chi-square functions
-# ============================================================
-
-def chi2_value(
-    observed,
-    predicted,
+def nonlinear_chi2_and_gradient(
     pulls,
-    chi2_type,
+    sin2_theta12,
+    dm21,
+    config_name,
 ):
-    """
-    Evaluate the data chi-square plus Gaussian pull penalties.
-    """
+    """Full nonlinear profiled objective for L-BFGS-B."""
 
-    observed = np.asarray(
-        observed,
-        dtype=float,
+    prediction, _, jacobian = evaluate_nonlinear_prediction(
+        sin2_theta12=sin2_theta12,
+        dm21=dm21,
+        config_name=config_name,
+        pulls=pulls,
+        need_jacobian=True,
     )
 
-    predicted = np.asarray(
-        predicted,
-        dtype=float,
+    prediction_fit = prediction[fit_mask]
+    jacobian_fit = jacobian[fit_mask, :]
+    observed_fit = observed_on_grid[fit_mask]
+
+    chi2_data, derivative_data = chi2_data_and_derivative(
+        observed=observed_fit,
+        predicted=prediction_fit,
+        chi2_type=CONFIGURATIONS[config_name]["chi2_type"],
     )
 
-    pulls = np.asarray(
-        pulls,
-        dtype=float,
+    if not np.isfinite(chi2_data):
+        return 1.0e100, np.zeros(N_NUISANCE, dtype=float)
+
+    pulls = np.asarray(pulls, dtype=float)
+
+    chi2_pull = float(np.sum(pulls**2))
+
+    gradient = (
+        jacobian_fit.T @ derivative_data
+        + 2.0 * pulls
     )
 
-    if np.any(
-        predicted <= 0.0
-    ):
-
-        return np.inf
-
-    if chi2_type == "cnp":
-
-        # Equivalent to
-        #
-        # (pred - obs)^2 /
-        # [3 / (1/obs + 2/pred)]
-        #
-        data_term = (
-            predicted**2
-            / (
-                3.0
-                * observed
-            )
-            - observed
-            + 2.0
-            * observed**2
-            / (
-                3.0
-                * predicted
-            )
-        )
-
-        chi2_data = np.sum(
-            data_term
-        )
+    return chi2_data + chi2_pull, gradient
 
 
-    elif chi2_type == "poisson":
-
-        data_term = (
-            predicted
-            - observed
-            + observed
-            * np.log(
-                observed
-                / predicted
-            )
-        )
-
-        chi2_data = (
-            2.0
-            * np.sum(
-                data_term
-            )
-        )
-
-
-    else:
-
-        raise ValueError(
-            "chi2_type must be 'cnp' or 'poisson'."
-        )
-
-    chi2_pulls = np.sum(
-        pulls**2
-    )
-
-    return (
-        chi2_data
-        + chi2_pulls
-    )
-
-
-# ============================================================
-# Profile Gaussian pull parameters with Newton iterations
-# ============================================================
-
-def profile_pulls(
-    nominal_full,
-    A_full,
-    chi2_type,
+def profile_nonlinear_pulls(
+    sin2_theta12,
+    dm21,
+    config_name,
     initial_pulls=None,
 ):
     """
-    Minimize the chi-square over all nuisance pulls.
-
-    Since the prediction is linearized as
-
-        N = N0 + A xi,
-
-    the gradient and Hessian can be calculated directly.
+    Numerically profile all nuisance parameters at one fixed
+    oscillation point using the full nonlinear prediction.
     """
 
-    nominal = np.asarray(
-        nominal_full[
-            fit_mask
-        ],
-        dtype=float,
-    )
-
-    A = np.asarray(
-        A_full[
-            fit_mask,
-            :
-        ],
-        dtype=float,
-    )
-
-    observed = np.asarray(
-        observed_on_grid[
-            fit_mask
-        ],
-        dtype=float,
-    )
-
-
     if initial_pulls is None:
+        initial_pulls = np.zeros(N_NUISANCE, dtype=float)
 
-        pulls = np.zeros(
-            N_NUISANCE,
-            dtype=float,
-        )
+    initial_pulls = clip_to_pull_bounds(initial_pulls)
 
-    else:
-
-        pulls = np.asarray(
-            initial_pulls,
-            dtype=float,
-        ).copy()
-
-
-    # If a warm start produces nonpositive predictions,
-    # gradually shrink it toward zero.
-    for _ in range(20):
-
-        predicted = (
-            nominal
-            + A
-            @ pulls
-        )
-
-        if np.all(
-            predicted > 1.0e-10
-        ):
-
-            break
-
-        pulls *= 0.5
-
-    identity = np.eye(
-        N_NUISANCE
+    result = minimize(
+        nonlinear_chi2_and_gradient,
+        x0=initial_pulls,
+        args=(
+            sin2_theta12,
+            dm21,
+            config_name,
+        ),
+        method="L-BFGS-B",
+        jac=True,
+        bounds=PULL_BOUNDS,
+        options={
+            "maxiter": PROFILE_MAXITER,
+            "ftol": PROFILE_FTOL,
+            "gtol": PROFILE_GTOL,
+            "maxls": 30,
+        },
     )
 
+    best_pulls = clip_to_pull_bounds(result.x)
 
-    for _ in range(
-        MAX_PULL_ITERATIONS
-    ):
-
-        predicted = (
-            nominal
-            + A
-            @ pulls
+    best_prediction, best_components, _ = (
+        evaluate_nonlinear_prediction(
+            sin2_theta12=sin2_theta12,
+            dm21=dm21,
+            config_name=config_name,
+            pulls=best_pulls,
+            need_jacobian=False,
         )
-
-        if np.any(
-            predicted <= 1.0e-12
-        ):
-
-            pulls *= 0.5
-            continue
-
-
-        # ----------------------------------------------------
-        # Gradient and Hessian of the data term
-        # ----------------------------------------------------
-
-        if chi2_type == "cnp":
-
-            derivative = (
-                2.0
-                * predicted
-                / (
-                    3.0
-                    * observed
-                )
-                - 2.0
-                * observed**2
-                / (
-                    3.0
-                    * predicted**2
-                )
-            )
-
-            curvature = (
-                2.0
-                / (
-                    3.0
-                    * observed
-                )
-                + 4.0
-                * observed**2
-                / (
-                    3.0
-                    * predicted**3
-                )
-            )
-
-
-        elif chi2_type == "poisson":
-
-            derivative = (
-                2.0
-                * (
-                    1.0
-                    - observed
-                    / predicted
-                )
-            )
-
-            curvature = (
-                2.0
-                * observed
-                / predicted**2
-            )
-
-
-        else:
-
-            raise ValueError(
-                "Unknown chi-square type."
-            )
-
-
-        gradient = (
-            A.T
-            @ derivative
-            + 2.0
-            * pulls
-        )
-
-        Hessian = (
-            A.T
-            @ (
-                curvature[
-                    :,
-                    None
-                ]
-                * A
-            )
-            + 2.0
-            * identity
-        )
-
-        Hessian += (
-            1.0e-10
-            * identity
-        )
-
-
-        if np.max(
-            np.abs(
-                gradient
-            )
-        ) < PULL_TOLERANCE:
-
-            break
-
-
-        try:
-
-            step = np.linalg.solve(
-                Hessian,
-                -gradient,
-            )
-
-        except np.linalg.LinAlgError:
-
-            step = np.linalg.lstsq(
-                Hessian,
-                -gradient,
-                rcond=None,
-            )[0]
-
-
-        current_chi2 = chi2_value(
-            observed,
-            predicted,
-            pulls,
-            chi2_type,
-        )
-
-        directional_derivative = (
-            gradient
-            @ step
-        )
-
-        step_scale = 1.0
-
-        accepted = False
-
-        for _ in range(25):
-
-            trial_pulls = (
-                pulls
-                + step_scale
-                * step
-            )
-
-            trial_prediction = (
-                nominal
-                + A
-                @ trial_pulls
-            )
-
-            if np.any(
-                trial_prediction <= 1.0e-12
-            ):
-
-                step_scale *= 0.5
-                continue
-
-            trial_chi2 = chi2_value(
-                observed,
-                trial_prediction,
-                trial_pulls,
-                chi2_type,
-            )
-
-            armijo_limit = (
-                current_chi2
-                + 1.0e-4
-                * step_scale
-                * directional_derivative
-            )
-
-            if (
-                np.isfinite(
-                    trial_chi2
-                )
-                and trial_chi2
-                <= armijo_limit
-            ):
-
-                pulls = trial_pulls
-                accepted = True
-                break
-
-            step_scale *= 0.5
-
-
-        if not accepted:
-
-            break
-
-
-        if np.linalg.norm(
-            step_scale
-            * step
-        ) < (
-            PULL_TOLERANCE
-            * (
-                1.0
-                + np.linalg.norm(
-                    pulls
-                )
-            )
-        ):
-
-            break
-
-
-    predicted_fit = (
-        nominal
-        + A
-        @ pulls
     )
 
-    final_chi2 = chi2_value(
-        observed,
-        predicted_fit,
-        pulls,
-        chi2_type,
-    )
-
-    predicted_full = (
-        nominal_full
-        + A_full
-        @ pulls
+    best_chi2, _ = nonlinear_chi2_and_gradient(
+        best_pulls,
+        sin2_theta12,
+        dm21,
+        config_name,
     )
 
     return (
-        final_chi2,
-        pulls,
-        predicted_full,
+        float(best_chi2),
+        best_pulls,
+        best_prediction,
+        best_components,
+        result,
     )
 
 
@@ -1988,369 +1830,275 @@ dm21_grid = np.linspace(
 # Scan one analysis configuration
 # ============================================================
 
-def scan_configuration(
-    config_name,
-):
+def scan_configuration(config_name):
     """
-    Scan sin^2(theta12) and dm21 while profiling all
-    nuisance pulls at each grid point.
+    Scan sin^2(theta12) and dm21 while numerically profiling the
+    complete nonlinear nuisance model at every grid point.
     """
 
-    config = CONFIGURATIONS[
-        config_name
-    ]
+    config = CONFIGURATIONS[config_name]
 
-    chi2_grid = np.zeros(
-        (
-            N_DM21,
-            N_THETA12,
-        ),
+    chi2_grid = np.full(
+        (N_DM21, N_THETA12),
+        np.nan,
         dtype=float,
     )
 
     pulls_grid = np.zeros(
-        (
-            N_DM21,
-            N_THETA12,
-            N_NUISANCE,
-        ),
+        (N_DM21, N_THETA12, N_NUISANCE),
         dtype=float,
     )
 
+    success_grid = np.zeros(
+        (N_DM21, N_THETA12),
+        dtype=bool,
+    )
+
     print()
-    print("=" * 72)
-    print(
-        f"Scanning configuration: {config_name}"
-    )
-    print(
-        f"Statistical definition: "
-        f"{config['chi2_type']}"
-    )
-    print("=" * 72)
+    print("=" * 76)
+    print(f"Scanning configuration: {config_name}")
+    print(f"Statistical definition: {config['chi2_type']}")
+    print("Nuisance treatment: full nonlinear numerical profiling")
+    print("=" * 76)
 
+    best_warm_start = np.zeros(N_NUISANCE, dtype=float)
 
-    for i_dm, dm21_test in enumerate(
-        dm21_grid
-    ):
+    for i_dm, dm21_test in enumerate(dm21_grid):
 
-        # Snake through the grid so neighboring points
-        # can be used as warm starts.
+        # Snake through the grid, allowing neighboring points to
+        # provide warm starts without changing the physical result.
         if i_dm % 2 == 0:
-
-            theta_indices = range(
-                N_THETA12
-            )
-
+            theta_indices = list(range(N_THETA12))
         else:
+            theta_indices = list(range(N_THETA12 - 1, -1, -1))
 
-            theta_indices = range(
-                N_THETA12 - 1,
-                -1,
-                -1,
-            )
-
-
-        previous_theta_index = None
+        previous_pulls = None
 
         for i_theta in theta_indices:
 
-            sin2_test = (
-                sin2_theta12_grid[
-                    i_theta
-                ]
-            )
+            sin2_test = float(sin2_theta12_grid[i_theta])
 
-            nominal, A = build_linearized_model(
-                sin2_theta12=sin2_test,
-                dm21=dm21_test,
-                config_name=config_name,
-            )
-
-
-            if previous_theta_index is not None:
-
-                initial_pulls = pulls_grid[
-                    i_dm,
-                    previous_theta_index,
-                    :
-                ]
-
+            if previous_pulls is not None:
+                initial_pulls = previous_pulls
             elif i_dm > 0:
-
-                initial_pulls = pulls_grid[
-                    i_dm - 1,
-                    i_theta,
-                    :
-                ]
-
+                initial_pulls = pulls_grid[i_dm - 1, i_theta, :]
             else:
+                initial_pulls = best_warm_start
 
-                initial_pulls = np.zeros(
-                    N_NUISANCE
-                )
-
-
-            chi2, best_pulls, _ = profile_pulls(
-                nominal_full=nominal,
-                A_full=A,
-                chi2_type=config[
-                    "chi2_type"
-                ],
+            (
+                chi2,
+                best_pulls,
+                _,
+                _,
+                optimizer_result,
+            ) = profile_nonlinear_pulls(
+                sin2_theta12=sin2_test,
+                dm21=float(dm21_test),
+                config_name=config_name,
                 initial_pulls=initial_pulls,
             )
 
-            chi2_grid[
-                i_dm,
-                i_theta
-            ] = chi2
+            # If a warm-started fit fails badly, retry once from
+            # zero pulls and retain whichever solution is better.
+            if (
+                not optimizer_result.success
+                or not np.isfinite(chi2)
+            ):
+                retry = profile_nonlinear_pulls(
+                    sin2_theta12=sin2_test,
+                    dm21=float(dm21_test),
+                    config_name=config_name,
+                    initial_pulls=np.zeros(N_NUISANCE),
+                )
 
-            pulls_grid[
-                i_dm,
-                i_theta,
-                :
-            ] = best_pulls
+                if retry[0] < chi2 or not np.isfinite(chi2):
+                    (
+                        chi2,
+                        best_pulls,
+                        _,
+                        _,
+                        optimizer_result,
+                    ) = retry
 
-            previous_theta_index = (
-                i_theta
-            )
+            chi2_grid[i_dm, i_theta] = chi2
+            pulls_grid[i_dm, i_theta, :] = best_pulls
+            success_grid[i_dm, i_theta] = optimizer_result.success
 
+            previous_pulls = best_pulls.copy()
+
+            if np.isfinite(chi2):
+                current_minimum = np.nanmin(chi2_grid)
+                if chi2 <= current_minimum:
+                    best_warm_start = best_pulls.copy()
+
+        row_success = int(np.sum(success_grid[i_dm, :]))
 
         print(
-            f"Completed dm21 row "
-            f"{i_dm + 1:3d}/{N_DM21}: "
-            f"{dm21_test:.6e} eV^2"
+            f"Completed dm21 row {i_dm + 1:3d}/{N_DM21}: "
+            f"{dm21_test:.6e} eV^2 | "
+            f"successful profiles {row_success}/{N_THETA12}"
         )
 
-
-    # --------------------------------------------------------
-    # Best grid point
-    # --------------------------------------------------------
+    if not np.any(np.isfinite(chi2_grid)):
+        raise RuntimeError(
+            f"No finite profile fit was obtained for {config_name}."
+        )
 
     best_grid_index = np.unravel_index(
-        np.argmin(
-            chi2_grid
-        ),
+        np.nanargmin(chi2_grid),
         chi2_grid.shape,
     )
 
-    best_grid_dm_index = (
-        best_grid_index[0]
+    best_grid_dm_index = best_grid_index[0]
+    best_grid_theta_index = best_grid_index[1]
+
+    best_theta = float(
+        sin2_theta12_grid[best_grid_theta_index]
     )
 
-    best_grid_theta_index = (
-        best_grid_index[1]
-    )
-
-    best_theta = (
-        sin2_theta12_grid[
-            best_grid_theta_index
-        ]
-    )
-
-    best_dm21 = (
-        dm21_grid[
-            best_grid_dm_index
-        ]
+    best_dm21 = float(
+        dm21_grid[best_grid_dm_index]
     )
 
     best_pulls = pulls_grid[
         best_grid_dm_index,
         best_grid_theta_index,
-        :
+        :,
     ].copy()
 
-
     # --------------------------------------------------------
-    # Optional continuous refinement
+    # Optional continuous refinement in the two oscillation
+    # parameters. Nuisance pulls remain numerically profiled.
     # --------------------------------------------------------
 
     if REFINE_BEST_FIT:
 
         dm_scale = 1.0e5
+        fixed_refinement_start = best_pulls.copy()
 
-        def profiled_physics_chi2(
-            physics_parameters,
-        ):
+        def profiled_physics_chi2(physics_parameters):
 
-            theta_test = float(
-                physics_parameters[0]
-            )
+            theta_test = float(physics_parameters[0])
+            dm_test = float(physics_parameters[1] / dm_scale)
 
-            dm_test = float(
-                physics_parameters[1]
-                / dm_scale
-            )
-
-            nominal, A = build_linearized_model(
+            chi2, _, _, _, _ = profile_nonlinear_pulls(
                 sin2_theta12=theta_test,
                 dm21=dm_test,
                 config_name=config_name,
-            )
-
-            chi2, _, _ = profile_pulls(
-                nominal_full=nominal,
-                A_full=A,
-                chi2_type=config[
-                    "chi2_type"
-                ],
-                initial_pulls=best_pulls,
+                initial_pulls=fixed_refinement_start,
             )
 
             return chi2
-
 
         refinement = minimize(
             profiled_physics_chi2,
             x0=np.array([
                 best_theta,
-                best_dm21
-                * dm_scale,
+                best_dm21 * dm_scale,
             ]),
             method="L-BFGS-B",
             bounds=[
-                (
-                    SIN2_THETA12_MIN,
-                    SIN2_THETA12_MAX,
-                ),
-                (
-                    DM21_MIN
-                    * dm_scale,
-                    DM21_MAX
-                    * dm_scale,
-                ),
+                (SIN2_THETA12_MIN, SIN2_THETA12_MAX),
+                (DM21_MIN * dm_scale, DM21_MAX * dm_scale),
             ],
             options={
-                "maxiter": 80,
-                "ftol": 1.0e-10,
+                "maxiter": 60,
+                "ftol": 1.0e-9,
+                "maxls": 20,
             },
         )
 
+        best_theta = float(refinement.x[0])
+        best_dm21 = float(refinement.x[1] / dm_scale)
 
-        if refinement.success:
-
-            best_theta = float(
-                refinement.x[0]
-            )
-
-            best_dm21 = float(
-                refinement.x[1]
-                / dm_scale
-            )
-
-        else:
-
+        if not refinement.success:
             print(
-                "Continuous refinement did not fully converge. "
-                "Using its final point."
+                "Continuous oscillation refinement did not fully "
+                "converge; its final finite point is retained."
             )
-
-            best_theta = float(
-                refinement.x[0]
-            )
-
-            best_dm21 = float(
-                refinement.x[1]
-                / dm_scale
-            )
-
 
     # --------------------------------------------------------
-    # Re-profile at final best-fit point
+    # Final nonlinear profile at the refined best-fit point
     # --------------------------------------------------------
 
-    best_nominal, best_A = (
-        build_linearized_model(
+    (
+        best_chi2,
+        best_pulls,
+        best_prediction,
+        best_components,
+        best_optimizer_result,
+    ) = profile_nonlinear_pulls(
+        sin2_theta12=best_theta,
+        dm21=best_dm21,
+        config_name=config_name,
+        initial_pulls=best_pulls,
+    )
+
+    # Lower histogram in the paper: reactor-only spectrum at the
+    # best-fit oscillation point with every nuisance pull set to zero.
+    zero_prediction, zero_components, _ = (
+        evaluate_nonlinear_prediction(
             sin2_theta12=best_theta,
             dm21=best_dm21,
             config_name=config_name,
+            pulls=np.zeros(N_NUISANCE),
+            need_jacobian=False,
         )
     )
 
-    best_chi2, best_pulls, best_prediction = (
-        profile_pulls(
-            nominal_full=best_nominal,
-            A_full=best_A,
-            chi2_type=config[
-                "chi2_type"
-            ],
-            initial_pulls=best_pulls,
-        )
-    )
+    best_reactor_no_pulls = zero_components["reactor"]
 
+    delta_chi2_grid = chi2_grid - best_chi2
+    delta_chi2_grid = np.maximum(delta_chi2_grid, 0.0)
 
-    delta_chi2_grid = (
-        chi2_grid
-        - best_chi2
-    )
-
-    # Prevent tiny negative values caused by numerical
-    # refinement below the discrete grid minimum.
-    delta_chi2_grid = np.maximum(
-        delta_chi2_grid,
-        0.0,
-    )
-
-
-    profile_theta12 = np.min(
+    profile_theta12 = np.nanmin(
         delta_chi2_grid,
         axis=0,
     )
 
-    profile_dm21 = np.min(
+    profile_dm21 = np.nanmin(
         delta_chi2_grid,
         axis=1,
     )
 
-
     print()
+    print(f"Best fit for {config_name}")
+    print("-" * 76)
+    print(f"sin^2(theta12) = {best_theta:.8f}")
+    print(f"dm21            = {best_dm21:.8e} eV^2")
+    print(f"chi2_min        = {best_chi2:.6f}")
     print(
-        f"Best fit for {config_name}"
+        "nuisance optimizer success = "
+        f"{best_optimizer_result.success}"
     )
-    print("-" * 72)
-
     print(
-        f"sin^2(theta12) = "
-        f"{best_theta:.8f}"
-    )
-
-    print(
-        f"dm21            = "
-        f"{best_dm21:.8e} eV^2"
-    )
-
-    print(
-        f"chi2_min        = "
-        f"{best_chi2:.6f}"
+        "nuisance optimizer message = "
+        f"{best_optimizer_result.message}"
     )
 
-    print(
-        "Largest fitted nuisance pulls:"
-    )
+    print("Largest fitted nuisance pulls:")
 
-    pull_order = np.argsort(
-        np.abs(
-            best_pulls
-        )
-    )[::-1]
+    pull_order = np.argsort(np.abs(best_pulls))[::-1]
 
     for pull_index in pull_order[:12]:
-
         print(
             f"  {NUISANCE_NAMES[pull_index]:32s} "
             f"{best_pulls[pull_index]:+9.4f}"
         )
-
 
     return {
         "config_name": config_name,
         "chi2_grid": chi2_grid,
         "delta_chi2_grid": delta_chi2_grid,
         "pulls_grid": pulls_grid,
+        "success_grid": success_grid,
         "best_theta12": best_theta,
         "best_dm21": best_dm21,
         "best_chi2": best_chi2,
         "best_pulls": best_pulls,
         "best_prediction": best_prediction,
+        "best_reactor_no_pulls": best_reactor_no_pulls,
+        "best_components": best_components,
         "profile_theta12": profile_theta12,
         "profile_dm21": profile_dm21,
     }
@@ -2416,6 +2164,14 @@ np.savez(
         "cnf1"
     ]["best_prediction"],
 
+    best_reactor_no_pulls_cnf1=results[
+        "cnf1"
+    ]["best_reactor_no_pulls"],
+
+    success_grid_cnf1=results[
+        "cnf1"
+    ]["success_grid"],
+
     chi2_cnf2=results[
         "cnf2"
     ]["chi2_grid"],
@@ -2443,6 +2199,19 @@ np.savez(
     best_prediction_cnf2=results[
         "cnf2"
     ]["best_prediction"],
+
+    best_reactor_no_pulls_cnf2=results[
+        "cnf2"
+    ]["best_reactor_no_pulls"],
+
+    success_grid_cnf2=results[
+        "cnf2"
+    ]["success_grid"],
+
+    fit_mode=np.array(
+        "full_nonlinear_numerical_profiling",
+        dtype=str,
+    ),
 
     nuisance_names=np.array(
         NUISANCE_NAMES,
@@ -2531,6 +2300,41 @@ LINE_STYLES = [
     "--",
     ":",
 ]
+
+# Correlated-Gaussian representation of the official JUNO result.
+# This uses the published best fit and 1D errors.  It is intended as
+# a faithful visual reference, not as a replacement for a released
+# official two-dimensional likelihood grid.
+THETA_MESH, DM21_MESH = np.meshgrid(
+    sin2_theta12_grid,
+    dm21_grid,
+)
+
+juno_x = (
+    (THETA_MESH - JUNO_BEST_SIN2_THETA12)
+    / JUNO_SIGMA_SIN2_THETA12
+)
+
+juno_y = (
+    (DM21_MESH - JUNO_BEST_DM21)
+    / JUNO_SIGMA_DM21
+)
+
+JUNO_DELTA_CHI2_GRID = (
+    juno_x**2
+    - 2.0 * JUNO_CORRELATION * juno_x * juno_y
+    + juno_y**2
+) / (1.0 - JUNO_CORRELATION**2)
+
+JUNO_PROFILE_THETA12 = (
+    (sin2_theta12_grid - JUNO_BEST_SIN2_THETA12)
+    / JUNO_SIGMA_SIN2_THETA12
+) ** 2
+
+JUNO_PROFILE_DM21 = (
+    (dm21_grid - JUNO_BEST_DM21)
+    / JUNO_SIGMA_DM21
+) ** 2
 
 
 for config_name in [
@@ -2622,6 +2426,37 @@ for config_name in [
         lw=2.0,
     )
 
+
+# ------------------------------------------------------------
+# Official JUNO reference, shown as black dashed curves
+# ------------------------------------------------------------
+
+ax_theta_profile.plot(
+    sin2_theta12_grid,
+    JUNO_PROFILE_THETA12,
+    color="black",
+    linestyle="--",
+    lw=1.8,
+    label="JUNO",
+)
+
+ax_contour.contour(
+    sin2_theta12_grid,
+    dm21_grid * 1.0e5,
+    JUNO_DELTA_CHI2_GRID,
+    levels=CONTOUR_LEVELS,
+    colors="black",
+    linestyles="--",
+    linewidths=1.6,
+)
+
+ax_dm_profile.plot(
+    JUNO_PROFILE_DM21,
+    dm21_grid * 1.0e5,
+    color="black",
+    linestyle="--",
+    lw=1.8,
+)
 
 # ============================================================
 # Format one-dimensional profile plots
@@ -2715,6 +2550,15 @@ for config_name in [
         label=config_name,
     )
 
+ax_contour.plot(
+    [],
+    [],
+    color="black",
+    linestyle="--",
+    lw=1.8,
+    label="JUNO",
+)
+
 ax_contour.legend(
     frameon=False,
     loc="upper right",
@@ -2749,54 +2593,51 @@ spectrum_axes = {
 }
 
 for config_name, axis in spectrum_axes.items():
+    result = results[config_name]
+    color = CONFIGURATIONS[config_name]["plot_color"]
 
-    result = results[
-        config_name
-    ]
-
-    axis.plot(
-        E_prompt_bins[
-            fit_mask
-        ],
-        result[
-            "best_prediction"
-        ][
-            fit_mask
-        ],
-        lw=2.0,
+    # Lower histograms: reactor-only spectra without pull shifts.
+    axis.step(
+        E_prompt_bins[fit_mask],
+        result["best_reactor_no_pulls"][fit_mask],
+        where="mid",
+        color=color,
+        lw=1.8,
         label=config_name,
     )
 
-    axis.plot(
-        E_prompt_bins[
-            fit_mask
-        ],
-        observed_on_grid[
-            fit_mask
-        ],
-        "--",
+    axis.step(
+        E_prompt_bins[fit_mask],
+        juno_reactor_on_grid[fit_mask],
+        where="mid",
         color="black",
-        lw=1.4,
+        linestyle="--",
+        lw=1.3,
         label="JUNO",
     )
 
-    axis.set_xlim(
-        FIT_ENERGY_MIN,
-        FIT_ENERGY_MAX,
+    # Upper histograms: reactor + backgrounds after profiling pulls.
+    axis.step(
+        E_prompt_bins[fit_mask],
+        result["best_prediction"][fit_mask],
+        where="mid",
+        color=color,
+        lw=1.8,
     )
 
-    axis.set_ylabel(
-        "Events per 0.1 MeV"
+    axis.step(
+        E_prompt_bins[fit_mask],
+        juno_total_on_grid[fit_mask],
+        where="mid",
+        color="black",
+        linestyle="--",
+        lw=1.3,
     )
 
-    axis.grid(
-        alpha=0.25
-    )
-
-    axis.legend(
-        frameon=False,
-        fontsize=9,
-    )
+    axis.set_xlim(FIT_ENERGY_MIN, FIT_ENERGY_MAX)
+    axis.set_ylabel("Events per 0.1 MeV")
+    axis.grid(alpha=0.25)
+    axis.legend(frameon=False, fontsize=9)
 
     axis.text(
         0.97,
@@ -2815,15 +2656,8 @@ for config_name, axis in spectrum_axes.items():
         fontsize=8.5,
     )
 
-
-ax_spectrum_cnf1.tick_params(
-    labelbottom=False
-)
-
-ax_spectrum_cnf2.set_xlabel(
-    r"$E_{\rm pr}\ [{\rm MeV}]$"
-)
-
+ax_spectrum_cnf1.tick_params(labelbottom=False)
+ax_spectrum_cnf2.set_xlabel(r"$E_{\rm pr}\ [{\rm MeV}]$")
 
 # ============================================================
 # Save and show figure
@@ -2852,6 +2686,13 @@ plt.show()
 # ============================================================
 
 print()
+print(
+    "Official JUNO reference: "
+    f"sin^2(theta12) = {JUNO_BEST_SIN2_THETA12:.4f} +/- "
+    f"{JUNO_SIGMA_SIN2_THETA12:.4f}, "
+    f"dm21 = ({JUNO_BEST_DM21 * 1.0e5:.2f} +/- "
+    f"{JUNO_SIGMA_DM21 * 1.0e5:.2f}) x 10^-5 eV^2"
+)
 print("=" * 78)
 print("FINAL OSCILLATION FIT RESULTS")
 print("=" * 78)

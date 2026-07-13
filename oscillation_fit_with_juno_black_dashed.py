@@ -64,6 +64,23 @@ RESULTS_PATH = Path("oscillation_fit_cnf1_cnf2.npz")
 
 
 # ============================================================
+# JUNO reference curves
+# ============================================================
+
+# These values define a correlated-Gaussian approximation to the
+# JUNO solar-parameter result. The resulting black dashed curves
+# are a visual reference, not an exact released JUNO likelihood grid.
+JUNO_BEST_SIN2_THETA12 = 0.3092
+JUNO_SIGMA_SIN2_THETA12 = 0.0087
+
+JUNO_BEST_DM21 = 7.50e-5
+JUNO_SIGMA_DM21 = 0.12e-5
+
+# Correlation controls the tilt of the 2D dashed contours.
+JUNO_CORRELATION = -0.23
+
+
+# ============================================================
 # Analysis configurations
 # ============================================================
 
@@ -2533,6 +2550,54 @@ LINE_STYLES = [
 ]
 
 
+# ============================================================
+# Correlated-Gaussian JUNO reference
+# ============================================================
+
+THETA_MESH, DM21_MESH = np.meshgrid(
+    sin2_theta12_grid,
+    dm21_grid,
+)
+
+juno_theta_standardized = (
+    THETA_MESH
+    - JUNO_BEST_SIN2_THETA12
+) / JUNO_SIGMA_SIN2_THETA12
+
+juno_dm21_standardized = (
+    DM21_MESH
+    - JUNO_BEST_DM21
+) / JUNO_SIGMA_DM21
+
+JUNO_DELTA_CHI2_GRID = (
+    juno_theta_standardized**2
+    - 2.0
+    * JUNO_CORRELATION
+    * juno_theta_standardized
+    * juno_dm21_standardized
+    + juno_dm21_standardized**2
+) / (
+    1.0
+    - JUNO_CORRELATION**2
+)
+
+JUNO_PROFILE_THETA12 = (
+    (
+        sin2_theta12_grid
+        - JUNO_BEST_SIN2_THETA12
+    )
+    / JUNO_SIGMA_SIN2_THETA12
+) ** 2
+
+JUNO_PROFILE_DM21 = (
+    (
+        dm21_grid
+        - JUNO_BEST_DM21
+    )
+    / JUNO_SIGMA_DM21
+) ** 2
+
+
 for config_name in [
     "cnf1",
     "cnf2",
@@ -2621,6 +2686,48 @@ for config_name in [
         color=color,
         lw=2.0,
     )
+
+
+# ============================================================
+# Plot JUNO reference as black dashed curves
+# ============================================================
+
+ax_theta_profile.plot(
+    sin2_theta12_grid,
+    JUNO_PROFILE_THETA12,
+    color="black",
+    linestyle="--",
+    lw=1.8,
+    label="JUNO",
+)
+
+ax_contour.contour(
+    sin2_theta12_grid,
+    dm21_grid * 1.0e5,
+    JUNO_DELTA_CHI2_GRID,
+    levels=CONTOUR_LEVELS,
+    colors="black",
+    linestyles="--",
+    linewidths=1.6,
+)
+
+ax_contour.scatter(
+    JUNO_BEST_SIN2_THETA12,
+    JUNO_BEST_DM21 * 1.0e5,
+    marker="+",
+    s=65,
+    linewidths=1.8,
+    color="black",
+    zorder=5,
+)
+
+ax_dm_profile.plot(
+    JUNO_PROFILE_DM21,
+    dm21_grid * 1.0e5,
+    color="black",
+    linestyle="--",
+    lw=1.8,
+)
 
 
 # ============================================================
@@ -2714,6 +2821,15 @@ for config_name in [
         lw=2.0,
         label=config_name,
     )
+
+ax_contour.plot(
+    [],
+    [],
+    color="black",
+    linestyle="--",
+    lw=1.8,
+    label="JUNO",
+)
 
 ax_contour.legend(
     frameon=False,

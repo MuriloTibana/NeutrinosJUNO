@@ -78,17 +78,46 @@ N_DM21_POINTS = 25
 FIT_MAXITER_GLOBAL = 160
 FIT_MAXITER_SCAN = 80
 
-# Narrower plotting/scanning window to reproduce the Figure 2-style panel.
-SIN2_THETA12_RANGE = (0.275, 0.385)
-DM21_RANGE = (6.0e-5, 7.7e-5)
+# Figure 2-style plotting/scanning window.
+SIN2_THETA12_RANGE = (0.27, 0.35)
+DM21_RANGE = (7.0e-5, 8.0e-5)
+
+# Prompt-energy bins included in the fit.
+FIT_ENERGY_MIN = 0.8
+FIT_ENERGY_MAX = 8.0
+
+# Fit both smooth JUNO reference curves:
+#   reactor_signal      -> reactor-only prediction
+#   reactor_background  -> reactor + backgrounds prediction
+#
+# The right-hand plots display only one black dashed JUNO curve:
+# reactor_background. The reactor_signal curve remains a fit target
+# but is intentionally not drawn.
+FIT_SMOOTH_JUNO_REACTOR = True
+FIT_SMOOTH_JUNO_TOTAL = True
+
+REACTOR_SPECTRUM_WEIGHT = 1.0
+TOTAL_SPECTRUM_WEIGHT = 1.0
+
+# 1.0 gives the standard Gaussian nuisance penalty sum(xi_k^2).
+# Set to 0.0 only for a strict curve-closure diagnostic.
+PULL_PENALTY_WEIGHT = 1.0
+
+# Correlated-Gaussian JUNO plotting reference used only when an
+# exact external JUNO Delta-chi-square grid is unavailable.
+JUNO_BEST_SIN2_THETA12 = 0.3092
+JUNO_SIGMA_SIN2_THETA12 = 0.0087
+JUNO_BEST_DM21 = 7.50e-5
+JUNO_SIGMA_DM21 = 0.12e-5
+JUNO_CORRELATION = -0.23
 
 PULL_BOUNDS = (-5.0, 5.0)
 
 SAVE_RESULTS = True
 SAVE_FIGURES = True
 
-CONFIG_COMPARISON_FIGURE_PATH = PROJECT_ROOT / "configuration_comparison_cnf1_cnf2.png"
-CONFIG_COMPARISON_RESULTS_PATH = PROJECT_ROOT / "configuration_comparison_cnf1_cnf2.npz"
+CONFIG_COMPARISON_FIGURE_PATH = PROJECT_ROOT / "configuration_comparison_cnf1_cnf2_joint_smooth_fit.png"
+CONFIG_COMPARISON_RESULTS_PATH = PROJECT_ROOT / "configuration_comparison_cnf1_cnf2_joint_smooth_fit.npz"
 
 
 # ============================================================
@@ -108,9 +137,8 @@ DYB_PATH_CANDIDATES = [
 ]
 
 DIGITIZED_BKG_CANDIDATES = [
-    PROJECT_ROOT / "data" / "fig3_backgrounds_digitized_raw.csv",
-    PROJECT_ROOT / "background" / "fig3_backgrounds_digitized_raw.csv",
-    PROJECT_ROOT / "fig3_backgrounds_digitized_raw.csv",
+    PROJECT_ROOT / "digitized_backgrounds.csv",
+    PROJECT_ROOT / "data" / "digitized_backgrounds.csv",
 ]
 
 NONLINEARITY_CANDIDATES = [
@@ -143,35 +171,14 @@ x_model = Epr_centers - prompt_beta
 
 
 # ============================================================
-# Fig. 3 raw digitized background settings
+# Digitized background settings
 # ============================================================
 
-# The raw CSV should have the columns:
-#   E_prompt, Li_He, geoneutrinos, world_reactors_digitized, bi_po, others
-# The values are raw Fig. 3 shapes. They are interpolated onto x_model,
-# aligned with the start of the model spectrum, and normalized below.
+DIGITIZED_BKG_BIN_WIDTH = 0.02
 
-ALIGN_BACKGROUND_START_WITH_SPECTRUM = True
-BACKGROUND_START_THRESHOLD_FRACTION = 1.0e-4
-
-NORMALIZED_BKG_OUTPUT_PATH = (
-    PROJECT_ROOT / "data" / "backgrounds_digitized_clean_interpolated_from_config.csv"
-)
-
-LIVE_DAYS = 59.1
-
-TABLE1_RATES_CPD = {
-    "LiHe": 4.3,
-    "Geo": 2.4,
-    "World": 0.88,
-    "BiPo": 0.18,
-    "Other": 0.04 + 0.02 + 0.05 + 0.08 + 4.9e-2,
-}
-
-TABLE1_TOTAL_EVENTS = {
-    name: rate * LIVE_DAYS
-    for name, rate in TABLE1_RATES_CPD.items()
-}
+# If your digitized background file has units events / 0.02 MeV
+# and you want to convert to events / 0.1 MeV, set True.
+SCALE_DIGITIZED_FOR_MODEL = False
 
 
 # ============================================================
@@ -376,6 +383,20 @@ juno_react_bk_interp = np.interp(
 
 C_react = float(np.max(juno_react_interp))
 C_noosc = float(np.max(juno_noosc_interp))
+
+fit_mask = (
+    np.isfinite(juno_react_interp)
+    & np.isfinite(juno_react_bk_interp)
+    & (x_model >= FIT_ENERGY_MIN)
+    & (x_model <= FIT_ENERGY_MAX)
+    & (juno_react_interp > 0.0)
+    & (juno_react_bk_interp > 0.0)
+)
+
+if not np.any(fit_mask):
+    raise ValueError(
+        "No valid JUNO bins were found in the fitting range."
+    )
 
 
 # ============================================================
@@ -776,165 +797,52 @@ Ni_reactor_nominal = REACTOR_SCALE * raw_osc_nominal
 # Background model
 # ============================================================
 
-# This is the updated background system developed from Fig. 3:
-#   1. Read raw digitized curves from fig3_backgrounds_digitized_raw.csv.
-#   2. Interpolate each raw curve onto the model prompt-energy bin centers.
-#   3. Align the first nonzero background bin with the first nonzero model
-#      reactor-spectrum bin.
-#   4. Normalize each component to Table 1 total events.
-#   5. Return the grouped components used by the existing pull system:
-#      LiHe, Geo, World, BiPo, Other.
+def group_backgrounds(
+    B_Geo: np.ndarray,
+    B_World: np.ndarray,
+    B_Acc: np.ndarray,
+    B_LiHe: np.ndarray,
+    B_BiPo: np.ndarray,
+    B_AtmNC: np.ndarray,
+    B_FastN: np.ndarray,
+    B_DoubleN: np.ndarray,
+    B_C13an: np.ndarray,
+) -> dict[str, np.ndarray]:
+    B_Other = B_C13an + B_FastN + B_DoubleN + B_AtmNC + B_Acc
 
-
-def first_nonzero_energy(
-    E: np.ndarray,
-    y: np.ndarray,
-    threshold_fraction: float = BACKGROUND_START_THRESHOLD_FRACTION,
-) -> float:
-    """
-    Return the first energy where y is non-negligible.
-
-    The small threshold avoids letting tiny numerical tails decide the start.
-    """
-
-    E = np.asarray(E, dtype=float)
-    y = np.asarray(y, dtype=float)
-
-    good = np.isfinite(E) & np.isfinite(y)
-    E = E[good]
-    y = y[good]
-
-    if E.size == 0:
-        raise ValueError("Cannot determine start energy from an empty array.")
-
-    y = np.clip(y, 0.0, None)
-    y_max = float(np.max(y))
-
-    if y_max <= 0.0 or not np.isfinite(y_max):
-        return float(E[0])
-
-    threshold = threshold_fraction * y_max
-    idx = np.where(y > threshold)[0]
-
-    if len(idx) == 0:
-        return float(E[0])
-
-    return float(E[idx[0]])
-
-
-def interpolate_raw_background_curve(
-    E_raw: np.ndarray,
-    y_raw: np.ndarray,
-    E_target: np.ndarray,
-) -> np.ndarray:
-    """
-    Interpolate a raw digitized Fig. 3 curve onto the model bin centers.
-    """
-
-    E_raw = np.asarray(E_raw, dtype=float)
-    y_raw = np.asarray(y_raw, dtype=float)
-
-    good = np.isfinite(E_raw) & np.isfinite(y_raw)
-
-    E = E_raw[good]
-    y = y_raw[good]
-
-    if E.size < 2:
-        raise ValueError("Need at least two points to interpolate a background curve.")
-
-    order = np.argsort(E)
-    E = E[order]
-    y = y[order]
-
-    y_interp = np.interp(
-        E_target,
-        E,
-        y,
-        left=0.0,
-        right=0.0,
-    )
-
-    return np.clip(y_interp, 0.0, None)
-
-
-def normalize_background_shape_to_table1(
-    shape_events_per_0p1: np.ndarray,
-    component_name: str,
-) -> np.ndarray:
-    """
-    Normalize an interpolated Fig. 3 shape to Table 1 total events.
-
-    Fig. 3 is treated as events per 0.1 MeV. Since the model bin width is
-    also 0.1 MeV, each interpolated value is already events per model bin.
-    The formula below is kept explicit in case bin_width changes later.
-    """
-
-    shape_events_per_0p1 = np.asarray(shape_events_per_0p1, dtype=float)
-    shape_events_per_0p1 = np.clip(shape_events_per_0p1, 0.0, None)
-
-    counts_per_bin = shape_events_per_0p1 * (bin_width / 0.1)
-    current_total = float(np.sum(counts_per_bin))
-
-    if current_total <= 0.0 or not np.isfinite(current_total):
-        raise ValueError(f"{component_name} has zero or invalid total before normalization.")
-
-    target_total = TABLE1_TOTAL_EVENTS[component_name]
-
-    return counts_per_bin * target_total / current_total
-
-
-def get_required_background_column(
-    df: pd.DataFrame,
-    possible_names: list[str],
-    label: str,
-) -> np.ndarray:
-    """
-    Read one required background column using flexible column names.
-    """
-
-    col = find_digitized_column(df, possible_names)
-
-    if col is None:
-        raise KeyError(
-            f"No raw Fig. 3 column found for {label}. "
-            f"Tried {possible_names}. Available columns: {list(df.columns)}"
-        )
-
-    print(f"{label:12s}: using raw digitized column '{col}'")
-
-    y = df[col].to_numpy(dtype=float)
-    y = np.nan_to_num(y, nan=0.0)
-
-    return np.clip(y, 0.0, None)
+    return {
+        "LiHe": B_LiHe,
+        "Geo": B_Geo,
+        "World": B_World,
+        "BiPo": B_BiPo,
+        "Other": B_Other,
+    }
 
 
 def build_juno_reference_backgrounds() -> dict[str, np.ndarray]:
-    """
-    Keep the old reference option available.
-
-    The full JUNO reference background is placed in Other because spect-fit.txt
-    does not decompose it into Fig. 3 components.
-    """
-
     B_total_ref = np.clip(juno_react_bk_interp - juno_react_interp, 0.0, None)
     zeros = np.zeros_like(B_total_ref)
 
-    return {
-        "LiHe": zeros.copy(),
-        "Geo": zeros.copy(),
-        "World": zeros.copy(),
-        "BiPo": zeros.copy(),
-        "Other": B_total_ref,
-    }
+    return group_backgrounds(
+        B_Geo=zeros,
+        B_World=zeros,
+        B_Acc=zeros,
+        B_LiHe=zeros,
+        B_BiPo=zeros,
+        B_AtmNC=zeros,
+        B_FastN=zeros,
+        B_DoubleN=zeros,
+        B_C13an=B_total_ref,
+    )
 
 
 def build_digitized_backgrounds() -> dict[str, np.ndarray]:
     csv_path = first_existing_path(
         DIGITIZED_BKG_CANDIDATES,
-        "raw Fig. 3 digitized background CSV",
+        "digitized background CSV",
     )
 
-    print(f"\nUsing raw Fig. 3 digitized backgrounds: {csv_path}")
+    print(f"\nUsing digitized backgrounds: {csv_path}")
 
     df = pd.read_csv(csv_path)
     df = df.copy()
@@ -944,136 +852,109 @@ def build_digitized_backgrounds() -> dict[str, np.ndarray]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna(axis=0, how="all")
+    df = df.sort_values(df.columns[0]).reset_index(drop=True)
 
-    energy_col = find_digitized_column(
+    x_source = df.iloc[:, 0].to_numpy(dtype=float)
+
+    model_scale = bin_width / DIGITIZED_BKG_BIN_WIDTH
+
+    if not SCALE_DIGITIZED_FOR_MODEL:
+        model_scale = 1.0
+
+    print(f"Digitized bin width: {DIGITIZED_BKG_BIN_WIDTH:.3f} MeV")
+    print(f"Model bin width:     {bin_width:.3f} MeV")
+    print(f"Scale used in model: {model_scale:.3f}")
+
+    B_Geo_raw = interpolate_digitized_component(
         df,
-        ["E_prompt", "Prompt energy", "energy", "E"],
+        x_source,
+        x_model,
+        possible_names=["Geoneutrinos", "Geo", "GeoNeutrinos"],
+        label="Geo",
     )
 
-    if energy_col is None:
-        energy_col = df.columns[0]
-        print(f"Warning: no E_prompt column found. Using first column '{energy_col}' as energy.")
+    B_Acc_raw = interpolate_digitized_component(
+        df,
+        x_source,
+        x_model,
+        possible_names=["Accidentals", "Accidental", "Acc"],
+        label="Acc",
+    )
 
-    df = df.dropna(subset=[energy_col])
-    df = df.sort_values(energy_col).reset_index(drop=True)
+    B_LiHe_raw = interpolate_digitized_component(
+        df,
+        x_source,
+        x_model,
+        possible_names=["Li9_He8", "9Li_8He", "LiHe", "9Li8He"],
+        label="LiHe",
+    )
 
-    E_raw = df[energy_col].to_numpy(dtype=float)
+    B_C13an_raw = interpolate_digitized_component(
+        df,
+        x_source,
+        x_model,
+        possible_names=["C13_alpha_n_O16", "13C_alpha_n_16O", "C13an", "13C"],
+        label="C13an",
+    )
 
-    raw_curves = {
-        "LiHe": get_required_background_column(
-            df,
-            ["Li_He", "LiHe", "Li9_He8", "9Li_8He", "9Li8He"],
-            "LiHe",
-        ),
-        "Geo": get_required_background_column(
-            df,
-            ["geoneutrinos", "Geoneutrinos", "Geo", "GeoNeutrinos"],
-            "Geo",
-        ),
-        "World": get_required_background_column(
-            df,
-            [
-                "world_reactors_digitized",
-                "world_reactors",
-                "WorldReactors",
-                "WorldReactor",
-                "World",
-            ],
+    B_FastN_raw = interpolate_digitized_component(
+        df,
+        x_source,
+        x_model,
+        possible_names=["FastNeutrons", "Fast_neutrons", "FastN"],
+        label="FastN",
+    )
+
+    B_World_raw = interpolate_digitized_component(
+        df,
+        x_source,
+        x_model,
+        possible_names=[
+            "WorldReactor_antinu",
+            "World_reactor_nubar",
+            "WorldReactor",
             "World",
-        ),
-        "BiPo": get_required_background_column(
-            df,
-            ["bi_po", "BiPo", "Bi_Po", "Bi214Po214", "214Bi214Po"],
-            "BiPo",
-        ),
-        "Other": get_required_background_column(
-            df,
-            ["others", "Other", "Other_backgrounds", "Total_other"],
-            "Other",
-        ),
-    }
+        ],
+        label="World",
+    )
 
-    # First pass: interpolate with no shift. This is only used to find the
-    # background start on the same model bin grid as the spectrum.
-    pre_shapes = {
-        name: interpolate_raw_background_curve(E_raw, y_raw, x_model)
-        for name, y_raw in raw_curves.items()
-    }
+    B_AtmNC_raw = interpolate_digitized_component(
+        df,
+        x_source,
+        x_model,
+        possible_names=["AtmosphericNC", "Atmospheric_NC", "AtmNC"],
+        label="AtmNC",
+    )
 
-    pre_total = sum(pre_shapes.values())
+    B_BiPo_raw = interpolate_digitized_component(
+        df,
+        x_source,
+        x_model,
+        possible_names=["BiPo", "Bi214Po214", "214Bi214Po"],
+        label="BiPo",
+        allow_missing=True,
+    )
 
-    if ALIGN_BACKGROUND_START_WITH_SPECTRUM:
-        spectrum_start = first_nonzero_energy(
-            x_model,
-            Ni_reactor_nominal,
-            threshold_fraction=BACKGROUND_START_THRESHOLD_FRACTION,
-        )
+    B_DoubleN_raw = interpolate_digitized_component(
+        df,
+        x_source,
+        x_model,
+        possible_names=["DoubleNeutrons", "Double_neutrons", "DoubleN"],
+        label="DoubleN",
+        allow_missing=True,
+    )
 
-        background_start = first_nonzero_energy(
-            x_model,
-            pre_total,
-            threshold_fraction=BACKGROUND_START_THRESHOLD_FRACTION,
-        )
-
-        energy_shift = spectrum_start - background_start
-    else:
-        spectrum_start = first_nonzero_energy(x_model, Ni_reactor_nominal)
-        background_start = first_nonzero_energy(x_model, pre_total)
-        energy_shift = 0.0
-
-    E_raw_aligned = E_raw + energy_shift
-
-    print("\nBackground alignment:")
-    print(f"  spectrum start       = {spectrum_start:.4f} MeV")
-    print(f"  background start     = {background_start:.4f} MeV")
-    print(f"  applied energy shift = {energy_shift:.4f} MeV")
-
-    # Second pass: interpolate after the alignment shift, then normalize each
-    # component to its Table 1 total.
-    B_components_new = {}
-
-    for name, y_raw in raw_curves.items():
-        interp_shape = interpolate_raw_background_curve(
-            E_raw_aligned,
-            y_raw,
-            x_model,
-        )
-
-        B_components_new[name] = normalize_background_shape_to_table1(
-            interp_shape,
-            name,
-        )
-
-    B_total_new = sum(B_components_new.values())
-
-    print("\nTable 1 target background totals:")
-    for name, target in TABLE1_TOTAL_EVENTS.items():
-        print(f"  {name:8s}: {target:.6f}")
-
-    print("\nNormalized background totals before configuration scaling:")
-    for name, arr in B_components_new.items():
-        print(f"  {name:8s}: {np.sum(arr):.6f}")
-    print(f"  {'Total':8s}: {np.sum(B_total_new):.6f}")
-
-    # Save a clean normalized/interpolated table for checking.
-    NORMALIZED_BKG_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    out_df = pd.DataFrame({
-        "E_prompt": x_model,
-        "Li_He": B_components_new["LiHe"],
-        "geoneutrinos": B_components_new["Geo"],
-        "world_reactors": B_components_new["World"],
-        "bi_po": B_components_new["BiPo"],
-        "others": B_components_new["Other"],
-        "Total_background": B_total_new,
-    })
-
-    out_df.to_csv(NORMALIZED_BKG_OUTPUT_PATH, index=False)
-
-    print("\nSaved aligned, interpolated, normalized backgrounds to:")
-    print(f"  {NORMALIZED_BKG_OUTPUT_PATH}")
-
-    return B_components_new
+    return group_backgrounds(
+        B_Geo=model_scale * B_Geo_raw,
+        B_World=model_scale * B_World_raw,
+        B_Acc=model_scale * B_Acc_raw,
+        B_LiHe=model_scale * B_LiHe_raw,
+        B_BiPo=model_scale * B_BiPo_raw,
+        B_AtmNC=model_scale * B_AtmNC_raw,
+        B_FastN=model_scale * B_FastN_raw,
+        B_DoubleN=model_scale * B_DoubleN_raw,
+        B_C13an=model_scale * B_C13an_raw,
+    )
 
 
 if BACKGROUND_SOURCE == "digitized":
@@ -1100,7 +981,11 @@ print(f"  {'Total':8s}: {np.sum(B_total):.6g}")
 # Observation vector
 # ============================================================
 
-N_obs = juno_react_bk_interp.copy()
+N_obs_reactor = juno_react_interp.copy()
+N_obs_total = juno_react_bk_interp.copy()
+
+# Compatibility alias used in saved output.
+N_obs = N_obs_total.copy()
 
 
 # ============================================================
@@ -1297,7 +1182,14 @@ def make_x_from_osc_and_pulls(
 # Prediction and chi-square
 # ============================================================
 
-def predict_from_fit_vector(x: np.ndarray) -> np.ndarray:
+def predict_components_from_fit_vector(
+    x: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """
+    Recalculate the full nonlinear prediction at the current
+    oscillation parameters and nuisance pulls.
+    """
+
     p = unpack_fit_vector(x)
 
     S_raw = reactor_spectrum_raw(
@@ -1312,48 +1204,80 @@ def predict_from_fit_vector(x: np.ndarray) -> np.ndarray:
 
     S_reactor = REACTOR_SCALE * S_raw
 
-    S_sys = positive_scale(SIGMA_REACTOR_NORM, p["xi_reactor"]) * S_reactor
+    S_sys = (
+        positive_scale(
+            SIGMA_REACTOR_NORM,
+            p["xi_reactor"],
+        )
+        * S_reactor
+    )
 
     B_LiHe_sys = (
-        positive_scale(SIGMA_BG_NORM["LiHe"], p["xi_LiHe"])
+        positive_scale(
+            SIGMA_BG_NORM["LiHe"],
+            p["xi_LiHe"],
+        )
         * B_components["LiHe"]
     )
 
     B_Geo_sys = (
-        positive_scale(SIGMA_BG_NORM["Geo"], p["xi_Geo"])
+        positive_scale(
+            SIGMA_BG_NORM["Geo"],
+            p["xi_Geo"],
+        )
         * B_components["Geo"]
     )
 
     B_World_sys = (
-        positive_scale(SIGMA_BG_NORM["World"], p["xi_World"])
+        positive_scale(
+            SIGMA_BG_NORM["World"],
+            p["xi_World"],
+        )
         * B_components["World"]
     )
 
     B_BiPo_sys = (
-        positive_scale(SIGMA_BG_NORM["BiPo"], p["xi_BiPo"])
+        positive_scale(
+            SIGMA_BG_NORM["BiPo"],
+            p["xi_BiPo"],
+        )
         * B_components["BiPo"]
     )
 
     B_Other_sys = (
-        positive_scale(SIGMA_BG_NORM["Other"], p["xi_Other"])
+        positive_scale(
+            SIGMA_BG_NORM["Other"],
+            p["xi_Other"],
+        )
         * B_components["Other"]
     )
 
     B_LiHe_sys = B_LiHe_sys * (
-        1.0 + p["xi_LiHe_shape"] * lihe_shape_fraction
+        1.0
+        + p["xi_LiHe_shape"]
+        * lihe_shape_fraction
     )
     B_LiHe_sys = np.clip(B_LiHe_sys, 0.0, None)
 
-    N_pred = (
-        S_sys
-        + B_LiHe_sys
+    B_total_sys = (
+        B_LiHe_sys
         + B_Geo_sys
         + B_World_sys
         + B_BiPo_sys
         + B_Other_sys
     )
 
-    return np.clip(N_pred, 1e-12, None)
+    N_pred = S_sys + B_total_sys
+
+    return {
+        "reactor": np.clip(S_sys, 1e-12, None),
+        "background": np.clip(B_total_sys, 0.0, None),
+        "total": np.clip(N_pred, 1e-12, None),
+    }
+
+
+def predict_from_fit_vector(x: np.ndarray) -> np.ndarray:
+    return predict_components_from_fit_vector(x)["total"]
 
 
 def chi2_data_term(N_obs: np.ndarray, N_pred: np.ndarray) -> float:
@@ -1381,13 +1305,41 @@ def chi2_data_term(N_obs: np.ndarray, N_pred: np.ndarray) -> float:
 
 
 def chi2_full(x: np.ndarray) -> float:
+    """
+    Joint smooth-JUNO objective.
+
+    The full nonlinear response is rebuilt on every call. The
+    nuisance parameters are therefore numerically profiled rather
+    than represented by fixed linear templates.
+    """
+
     p = unpack_fit_vector(x)
+    components = predict_components_from_fit_vector(x)
 
-    N_pred = predict_from_fit_vector(x)
+    chi2_stat = 0.0
 
-    chi2_stat = chi2_data_term(N_obs, N_pred)
+    if FIT_SMOOTH_JUNO_REACTOR:
+        chi2_stat += (
+            REACTOR_SPECTRUM_WEIGHT
+            * chi2_data_term(
+                N_obs_reactor[fit_mask],
+                components["reactor"][fit_mask],
+            )
+        )
 
-    chi2_pull = np.sum(p["theta"] ** 2)
+    if FIT_SMOOTH_JUNO_TOTAL:
+        chi2_stat += (
+            TOTAL_SPECTRUM_WEIGHT
+            * chi2_data_term(
+                N_obs_total[fit_mask],
+                components["total"][fit_mask],
+            )
+        )
+
+    chi2_pull = (
+        PULL_PENALTY_WEIGHT
+        * np.sum(p["theta"] ** 2)
+    )
 
     return float(chi2_stat + chi2_pull)
 
@@ -1439,7 +1391,9 @@ def run_global_fit_current_config(cfg: dict) -> dict:
         fit_elapsed = perf_counter() - fit_t0
 
         x_best = result_global.x
-        N_best = predict_from_fit_vector(x_best)
+        components_best = predict_components_from_fit_vector(x_best)
+        N_best = components_best["total"]
+        N_reactor_best = components_best["reactor"]
         chi2_best = chi2_full(x_best)
         p_best = unpack_fit_vector(x_best)
 
@@ -1455,7 +1409,9 @@ def run_global_fit_current_config(cfg: dict) -> dict:
     else:
         result_global = None
         x_best = x_nominal.copy()
-        N_best = N_nominal.copy()
+        components_best = predict_components_from_fit_vector(x_best)
+        N_best = components_best["total"]
+        N_reactor_best = components_best["reactor"]
         chi2_best = chi2_nominal
         p_best = unpack_fit_vector(x_best)
 
@@ -1485,6 +1441,7 @@ def run_global_fit_current_config(cfg: dict) -> dict:
         "result_global": result_global,
         "x_best_global": x_best,
         "N_best_global": N_best,
+        "N_reactor_best_global": N_reactor_best,
         "chi2_best_global": chi2_best,
         "p_best_global": p_best,
     }
@@ -1606,7 +1563,11 @@ def run_solar_scan_current_config(cfg: dict, global_fit_result: dict) -> dict:
         theta=best_pulls_scan,
     )
 
-    N_best_scan = predict_from_fit_vector(x_best_scan)
+    best_scan_components = predict_components_from_fit_vector(
+        x_best_scan
+    )
+    N_best_scan = best_scan_components["total"]
+    N_reactor_best_scan = best_scan_components["reactor"]
 
     print("\nBest fit from 2D solar scan:")
     print(f"  sin^2(theta12) = {best_sin2_scan:.8f}")
@@ -1633,6 +1594,7 @@ def run_solar_scan_current_config(cfg: dict, global_fit_result: dict) -> dict:
         "best_pulls": best_pulls_scan,
         "x_best_scan": x_best_scan,
         "N_best_scan": N_best_scan,
+        "N_reactor_best_scan": N_reactor_best_scan,
         "chi2_min": chi2_min_scan,
         "scan_elapsed": scan_elapsed,
     }
@@ -1670,7 +1632,22 @@ for cfg in CONFIGURATIONS:
 if SAVE_RESULTS and RUN_SOLAR_SCAN:
     save_dict = {
         "x_model": x_model,
+        "fit_mask": fit_mask,
         "N_obs": N_obs,
+        "N_obs_reactor": N_obs_reactor,
+        "N_obs_total": N_obs_total,
+        "pull_penalty_weight": np.array(
+            PULL_PENALTY_WEIGHT,
+            dtype=float,
+        ),
+        "reactor_spectrum_weight": np.array(
+            REACTOR_SPECTRUM_WEIGHT,
+            dtype=float,
+        ),
+        "total_spectrum_weight": np.array(
+            TOTAL_SPECTRUM_WEIGHT,
+            dtype=float,
+        ),
         "pull_names": np.array(pull_names, dtype=object),
     }
 
@@ -1687,8 +1664,14 @@ if SAVE_RESULTS and RUN_SOLAR_SCAN:
         save_dict[f"{key}_best_sin2"] = scan["best_sin2"]
         save_dict[f"{key}_best_dm21"] = scan["best_dm21"]
         save_dict[f"{key}_N_best_scan"] = scan["N_best_scan"]
+        save_dict[f"{key}_N_reactor_best_scan"] = (
+            scan["N_reactor_best_scan"]
+        )
         save_dict[f"{key}_N_nominal"] = glob["N_nominal"]
         save_dict[f"{key}_N_best_global"] = glob["N_best_global"]
+        save_dict[f"{key}_N_reactor_best_global"] = (
+            glob["N_reactor_best_global"]
+        )
 
     np.savez(CONFIG_COMPARISON_RESULTS_PATH, **save_dict)
 
@@ -1703,18 +1686,22 @@ if SAVE_RESULTS and RUN_SOLAR_SCAN:
 if RUN_SOLAR_SCAN:
     from matplotlib.ticker import AutoMinorLocator
 
-    FIG2_PATH = PROJECT_ROOT / "figure2_cnf1_cnf2_style.png"
-    FIG2_PDF_PATH = PROJECT_ROOT / "figure2_cnf1_cnf2_style.pdf"
+    FIG2_PATH = PROJECT_ROOT / "figure2_cnf1_cnf2_one_juno_dashed.png"
+    FIG2_PDF_PATH = PROJECT_ROOT / "figure2_cnf1_cnf2_one_juno_dashed.pdf"
 
-    # Optional external JUNO contour file.
-    # If you have the official JUNO scan/contour arrays, save them here with keys:
+    # Optional exact external JUNO likelihood grid.
+    # Expected keys:
     #   sin2_theta12_grid
     #   dm21_grid
     #   dchi2_grid
-    # Otherwise, the script uses cnf 2 as a dashed plotting proxy, only so the
-    # layout resembles the reference figure.
-    JUNO_REFERENCE_NPZ = PROJECT_ROOT / "data" / "juno_reference_solar_scan.npz"
-    USE_CNF2_AS_JUNO_PROXY_IF_MISSING = True
+    #
+    # If unavailable, a correlated-Gaussian JUNO reference is
+    # generated from the published best fit and 1D uncertainties.
+    JUNO_REFERENCE_NPZ = (
+        PROJECT_ROOT
+        / "data"
+        / "juno_reference_solar_scan.npz"
+    )
 
     paper_colors = {
         "cnf1": "#ff1493",   # magenta-like
@@ -1746,13 +1733,11 @@ if RUN_SOLAR_SCAN:
         ax.xaxis.set_minor_locator(AutoMinorLocator())
         ax.yaxis.set_minor_locator(AutoMinorLocator())
 
-    def load_juno_reference() -> dict | None:
+    def load_juno_reference() -> dict:
         """
-        Load independent JUNO contour arrays if available.
-
-        Without the official JUNO Delta-chi-square surface, spect-fit.txt alone
-        is not enough to reconstruct the dashed black contour. The fallback below
-        is only a visual placeholder.
+        Load an exact external JUNO Delta-chi-square grid when
+        available. Otherwise return a correlated-Gaussian visual
+        reference.
         """
 
         if JUNO_REFERENCE_NPZ.exists():
@@ -1769,20 +1754,45 @@ if RUN_SOLAR_SCAN:
 
             return juno_ref
 
-        if USE_CNF2_AS_JUNO_PROXY_IF_MISSING:
-            print("\nWarning: no external JUNO reference contour file found.")
-            print("Using cnf 2 as a dashed JUNO-style plotting proxy.")
-            print("For a real comparison, provide data/juno_reference_solar_scan.npz.")
+        print("\nWarning: exact JUNO likelihood grid not found.")
+        print("Using a correlated-Gaussian JUNO reference.")
 
-            cnf2_scan = get_config_result("cnf2")["scan"]
+        sin2_grid = np.linspace(
+            SIN2_THETA12_RANGE[0],
+            SIN2_THETA12_RANGE[1],
+            301,
+        )
 
-            return {
-                "sin2_theta12_grid": cnf2_scan["sin2_theta12_grid"],
-                "dm21_grid": cnf2_scan["dm21_grid"],
-                "dchi2_grid": cnf2_scan["dchi2_grid"],
-            }
+        dm21_grid = np.linspace(
+            DM21_RANGE[0],
+            DM21_RANGE[1],
+            301,
+        )
 
-        return None
+        theta_mesh, dm21_mesh = np.meshgrid(
+            sin2_grid,
+            dm21_grid,
+        )
+
+        theta_std = (
+            theta_mesh - JUNO_BEST_SIN2_THETA12
+        ) / JUNO_SIGMA_SIN2_THETA12
+
+        dm21_std = (
+            dm21_mesh - JUNO_BEST_DM21
+        ) / JUNO_SIGMA_DM21
+
+        dchi2_grid = (
+            theta_std**2
+            - 2.0 * JUNO_CORRELATION * theta_std * dm21_std
+            + dm21_std**2
+        ) / (1.0 - JUNO_CORRELATION**2)
+
+        return {
+            "sin2_theta12_grid": sin2_grid,
+            "dm21_grid": dm21_grid,
+            "dchi2_grid": dchi2_grid,
+        }
 
     def plot_contours_and_profiles(
         ax_main,
@@ -1852,25 +1862,6 @@ if RUN_SOLAR_SCAN:
             zorder=zorder,
         )
 
-    def reactor_only_spectrum_no_pulls(scan: dict) -> np.ndarray:
-        """
-        Reactor-only spectrum at the best-fit solar parameters.
-
-        This is the lower colored histogram in the right panels. It contains no
-        background components and no nuisance-pull shifts.
-        """
-
-        raw = reactor_spectrum_raw(
-            sin2_theta12_fit=scan["best_sin2"],
-            dm21_fit=scan["best_dm21"],
-            xi_flux=None,
-            xi_scl=0.0,
-            xi_bias=0.0,
-            xi_res=0.0,
-            use_osc=True,
-        )
-
-        return REACTOR_SCALE * raw
 
     # --------------------------------------------------------
     # Figure layout
@@ -1960,12 +1951,6 @@ if RUN_SOLAR_SCAN:
     ax_top.set_ylabel(r"$\Delta \chi^2$")
     ax_prof.set_xlabel(r"$\Delta \chi^2$")
 
-    ax_main.set_xlim(0.275, 0.345)
-    ax_main.set_ylim(7.0, 8.0)
-
-    ax_top.set_ylim(0.0, 9.0)
-    ax_prof.set_xlim(0.0, 9.0)
-
     ax_top.set_yticks([0, 2, 4, 6, 8])
     ax_prof.set_xticks([0, 2, 4, 6, 8])
 
@@ -2004,41 +1989,41 @@ if RUN_SOLAR_SCAN:
         # computing the reactor-only histogram.
         set_analysis_configuration(cfg)
 
-        N_reactor_only = reactor_only_spectrum_no_pulls(scan)
+        N_reactor_with_pulls = scan["N_reactor_best_scan"]
         N_best_with_pulls_and_backgrounds = scan["N_best_scan"]
 
-        # Lower colored histogram: reactor-only, no pull shifts.
+        # Lower colored histogram: profiled reactor component.
         ax.step(
-            x_model,
-            N_reactor_only,
-            where="mid",
-            color=color,
-            lw=1.0,
-            alpha=0.65,
-        )
-
-        # Higher colored histogram: best fit with pulls and backgrounds.
-        ax.step(
-            x_model,
-            N_best_with_pulls_and_backgrounds,
+            x_model[fit_mask],
+            N_reactor_with_pulls[fit_mask],
             where="mid",
             color=color,
             lw=1.2,
             label=label,
         )
 
-        # JUNO target spectrum.
+        # Upper colored histogram: profiled reactor + backgrounds.
         ax.step(
-            x_model,
-            N_obs,
+            x_model[fit_mask],
+            N_best_with_pulls_and_backgrounds[fit_mask],
+            where="mid",
+            color=color,
+            lw=1.2,
+        )
+
+        # Plot only one external JUNO reference in each spectrum
+        # panel: the smooth reactor-plus-background best fit.
+        ax.step(
+            x_model[fit_mask],
+            N_obs_total[fit_mask],
             where="mid",
             color="black",
+            linestyle="--",
             lw=1.0,
             label="JUNO",
         )
 
-        ax.set_xlim(0.8, 9.2)
-        ax.set_ylim(0.0, 55.0)
+        ax.set_xlim(FIT_ENERGY_MIN, FIT_ENERGY_MAX)
 
         ax.set_ylabel("events per 0.1 MeV", fontsize=9)
 
@@ -2064,6 +2049,50 @@ if RUN_SOLAR_SCAN:
     print("\nSaved Figure 2-style plot to:")
     print(f"  {FIG2_PATH}")
     print(f"  {FIG2_PDF_PATH}")
+
+
+# ============================================================
+# Smooth-JUNO fit diagnostics
+# ============================================================
+
+if RUN_SOLAR_SCAN:
+    print()
+    print("=" * 88)
+    print("SMOOTH-JUNO FIT RESIDUALS")
+    print("=" * 88)
+
+    for result in configuration_results:
+        key = result["cfg"]["key"]
+        scan = result["scan"]
+
+        reactor_residual = (
+            scan["N_reactor_best_scan"][fit_mask]
+            - N_obs_reactor[fit_mask]
+        )
+
+        total_residual = (
+            scan["N_best_scan"][fit_mask]
+            - N_obs_total[fit_mask]
+        )
+
+        print(f"\n{key}")
+        print(
+            "  reactor-only: "
+            f"RMS = {np.sqrt(np.mean(reactor_residual**2)):.6f}, "
+            f"max |residual| = {np.max(np.abs(reactor_residual)):.6f}"
+        )
+        print(
+            "  total:        "
+            f"RMS = {np.sqrt(np.mean(total_residual**2)):.6f}, "
+            f"max |residual| = {np.max(np.abs(total_residual)):.6f}"
+        )
+
+    print("=" * 88)
+
+print()
+print("Fitting system: full nonlinear nuisance profiling with L-BFGS-B")
+print("Targets: smooth JUNO reactor_signal and reactor_background")
+print(f"Pull penalty weight: {PULL_PENALTY_WEIGHT:.3f}")
 
 
 # ============================================================
