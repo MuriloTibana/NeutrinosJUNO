@@ -59,12 +59,9 @@ def draw_physical_pull(rng, fractional_uncertainty):
     """
 
     while True:
-        xi = rng.normal(loc=0.0, scale=1.0)
+        xi = rng.normal(loc=0.0, scale=fractional_uncertainty)
 
-        normalization_factor = (
-            1.0
-            + fractional_uncertainty * xi
-        )
+        normalization_factor = 1.0 + xi
 
         if normalization_factor >= 0.0:
             return xi

@@ -1,0 +1,11 @@
+CNF2 45x45 RESULT SUMMARY
+============================================================================
+Best sin^2(theta12): 0.3027272727
+Best Delta m^2_21: 7.5454545455e-05 eV^2
+Minimum chi-square: 84.592216
+Data contribution: 79.958752
+Pull contribution: 4.633464
+Successful points: 2025/2025
+Zero-pull points: 0
+Maximum constraint violation: 5.005935e-10
+Maximum stationarity improvement: 0.000000e+00

@@ -26,18 +26,12 @@ def neutrino_oscillation(E_nu, L_km, sin2_theta12, sin2_theta13, dm21, dm31):
     sin2_2theta13 = 4.0 * s13_2 * c13_2
 
     dm32 = dm31 - dm21
+    # dm31 = dm32 + dm21
 
     phase21 = 1.267e3 * dm21 * L_km / E_nu
     phase31 = 1.267e3 * dm31 * L_km / E_nu
     phase32 = 1.267e3 * dm32 * L_km / E_nu
 
-    Pee = (
-        1.0
-        - c13_2**2 * sin2_2theta12 * np.sin(phase21)**2
-        - sin2_2theta13 * (
-            c12_2 * np.sin(phase31)**2
-            + s12_2 * np.sin(phase32)**2
-        )
-    )
+    Pee = (1.0 - c13_2**2 * sin2_2theta12 * np.sin(phase21)**2 - sin2_2theta13 * (c12_2 * np.sin(phase31)**2 + s12_2 * np.sin(phase32)**2))
 
     return Pee

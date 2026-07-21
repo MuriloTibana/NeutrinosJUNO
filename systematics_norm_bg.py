@@ -135,7 +135,6 @@ osc_spectra_nominal = C_norm * Ni_nl
 
 # Normalization of the reactor neutrino event rate
 rng = np.random.default_rng(seed=123)
-XI_REACTOR_RATE = rng.normal(loc=0.0, scale=1.0)
 
 
 REACTOR_RATE_UNCERTAINTIES = {
@@ -145,13 +144,13 @@ REACTOR_RATE_UNCERTAINTIES = {
     "fission_fraction": 0.006,
     "spent_nuclear_fuel": 0.003,
     "non_equilibrium": 0.002,
-    "different_fission_fraction": 0.001,
-}
+    "different_fission_fraction": 0.001}
 
 SIGMA_REACTOR_RATE = np.sqrt(np.sum(np.array(list(REACTOR_RATE_UNCERTAINTIES.values()), dtype=float) ** 2))
 print("Combined reactor event-rate uncertainty: "f"{100.0 * SIGMA_REACTOR_RATE:.3f}%")
+XI_REACTOR_RATE = rng.normal(loc=0.0, scale=SIGMA_REACTOR_RATE)
 
-reactor_rate_factor = 1.0 + SIGMA_REACTOR_RATE * XI_REACTOR_RATE
+reactor_rate_factor = 1.0 +  XI_REACTOR_RATE
 osc_spectra = reactor_rate_factor * osc_spectra_nominal
 
 print(f"Random reactor-rate pull: xi = {XI_REACTOR_RATE:.4f}")
@@ -173,8 +172,7 @@ BACKGROUND_NORM_SIGMAS = {
     "geoneutrinos": 0.56,
     "world_reactors": 0.10,
     "bi_po": 0.56,
-    "others": 1.00,
-}
+    "others": 1.00}
 
 TABLE1_TOTAL_EVENTS = {
     name: rate * LIVE_DAYS
@@ -215,8 +213,7 @@ background_nominal = {
 
 XI_BACKGROUND = {
     name: draw_physical_pull(rng, BACKGROUND_NORM_SIGMAS[name])
-    for name in background_nominal
-}
+    for name in background_nominal}
 
 background_pulled = {}
 background_factors = {}
@@ -241,13 +238,8 @@ for name in background_nominal:
     sigma_bg = BACKGROUND_NORM_SIGMAS[name]
     factor_bg = background_factors[name]
 
-    nominal_events = np.sum(
-        background_nominal[name]
-    )
-
-    pulled_events = np.sum(
-        background_pulled[name]
-    )
+    nominal_events = np.sum(background_nominal[name])
+    pulled_events = np.sum(background_pulled[name])
 
     print(
         f"{name:20s} | "
@@ -255,18 +247,12 @@ for name in background_nominal:
         f"sigma = {100.0 * sigma_bg:6.2f}% | "
         f"factor = {factor_bg:8.4f} | "
         f"events = {nominal_events:9.3f} "
-        f"-> {pulled_events:9.3f}"
-    )
+        f"-> {pulled_events:9.3f}")
 
 print("=" * 76)
 
-Total_Background_nominal = sum(
-    background_nominal.values()
-)
-
-Total_Background = sum(
-    background_pulled.values()
-)
+Total_Background_nominal = sum(background_nominal.values())
+Total_Background = sum(background_pulled.values())
 osc_spectra_background_nominal = osc_spectra_nominal + Total_Background_nominal
 
 if reactor_normalization:    

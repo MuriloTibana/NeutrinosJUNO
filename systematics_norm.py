@@ -127,9 +127,8 @@ osc_spectra_nominal = C_norm * Ni_nl
 # Normalization of the reactor neutrino event rate
 FIG_PATH = "img/osc_sys_norm.png"
 
-rng = np.random.default_rng(seed=123)
-XI_REACTOR_RATE = rng.normal(loc=0.0, scale=1.0)
 
+rng = np.random.default_rng(seed=123)
 
 REACTOR_RATE_UNCERTAINTIES = {
     "target_protons": 0.010,
@@ -143,8 +142,9 @@ REACTOR_RATE_UNCERTAINTIES = {
 
 SIGMA_REACTOR_RATE = np.sqrt(np.sum(np.array(list(REACTOR_RATE_UNCERTAINTIES.values()), dtype=float) ** 2))
 print("Combined reactor event-rate uncertainty: "f"{100.0 * SIGMA_REACTOR_RATE:.3f}%")
+XI_REACTOR_RATE = rng.normal(loc=0.0, scale=SIGMA_REACTOR_RATE)
 
-reactor_rate_factor = 1.0 + SIGMA_REACTOR_RATE * XI_REACTOR_RATE
+reactor_rate_factor = 1.0 + XI_REACTOR_RATE
 osc_spectra = reactor_rate_factor * osc_spectra_nominal
 
 print(f"Random reactor-rate pull: xi = {XI_REACTOR_RATE:.4f}")
@@ -198,7 +198,7 @@ osc_spectra_background = osc_spectra + Total_Background
 
 # Plotting and Saving Figure
 plt.figure(figsize=(7.5, 4.8))
-plt.plot(E_prompt_bins, osc_spectra + Total_Background, ":", color="darkgoldenrod", lw=3, label=(rf"Random norm. pull: "rf"$\xi_{{\rm norm}}={XI_REACTOR_RATE:.2f}$"))
+plt.plot(E_prompt_bins, osc_spectra + Total_Background, ":", color="darkgoldenrod", lw=3, label=(rf"Random norm. pull: "rf"$\xi_{{\rm norm}}={XI_REACTOR_RATE:.4f}$"))
 plt.plot(E_prompt_bins, osc_spectra_nominal + Total_Background, "-", color="darkorange" ,lw=2, label="Model osc. (nominal)")
 plt.xlabel(r"$E_{\rm pr}$ [MeV]")
 plt.ylabel("Events per 0.1 MeV")

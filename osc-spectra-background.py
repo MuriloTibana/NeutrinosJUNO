@@ -22,10 +22,10 @@ m_n = 1.6749275e-27 * kg_to_MeV
 m_e = 9.1093837e-31 * kg_to_MeV
 Delta = m_n - m_p
 
-sin2_theta12 = 0.308
+sin2_theta12 = 0.3096
 sin2_theta13 = 0.02215
 
-dm21 = 7.49e-5      
+dm21 = 7.53e-5      
 dm31 = 2.513e-3     
 
 reactors = [

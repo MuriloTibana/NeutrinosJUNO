@@ -1,0 +1,21 @@
+CNF2 FIXED FIT PLOT SUMMARY
+============================================================================
+Best sin^2(theta12): 0.3055555556
+Best Delta m^2_21: 7.5555555556e-05 eV^2
+Minimum chi-square: 84.685724
+Data contribution: 80.422318
+Pull contribution: 4.263406
+
+Best-fit non-flux pulls:
+reactor_norm                 -0.107569
+Li_He_norm                   -1.752218
+Li_He_shape                  -0.197087
+geoneutrinos                 +0.127570
+world_reactors               +0.102950
+bi_po                        +0.119575
+others                       +0.289559
+energy_scale                 -0.539732
+energy_resolution            +0.031160
+
+Flux-pull Euclidean norm: 0.851720
+Largest absolute flux pull: 0.477374
